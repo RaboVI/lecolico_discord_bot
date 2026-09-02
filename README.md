@@ -6,3 +6,4 @@ LECO伺服器專用網址轉換工具
 3. Facebook
 4. Bilibili
 5. Wnacg
+6. X/Twitter
