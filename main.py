@@ -293,7 +293,7 @@ async def on_message(message):
                         domain_match = re.search(r"(x|twitter)\.com", raw_x_url).group(0)
                         fix_x_url = raw_x_url.replace(domain_match, chosen_proxy)
 
-                        await message.channel.send(f"[📌 X 影片轉址]({fix_x_url})")
+                        await message.channel.send(f"[Xfix]({fix_x_url})")
 
                         # 隱藏原始預覽
                         try:
