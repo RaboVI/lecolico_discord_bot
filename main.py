@@ -4,6 +4,7 @@ import os
 import random
 import requests
 from bs4 import BeautifulSoup
+from datetime import datetime, timezone
 from urllib.parse import urljoin
 
 # 設定 Intents 以便讀取訊息內容
@@ -31,6 +32,8 @@ FACEBOOK_PATTERN = r"(https?://(www\.|m\.|web\.)?(facebook\.com|fb\.watch)/[^\s]
 THREADS_PATTERN = r"(https?://(www\.)?threads\.(net|com)/[^\s]+)"
 # 新增：匹配 instagram.com 的網址
 INSTAGRAM_PATTERN = r"(https?://(www\.)?instagram\.com/[^\s]+)"
+# 匹配 x.com 或 twitter.com 的貼文網址
+X_PATTERN = r"(https?://(www\.)?(x|twitter)\.com/[^\s]+/status/\d+)"
 
 
 @client.event
@@ -208,7 +211,7 @@ async def on_message(message):
             except Exception as e:
                 print(f"無法隱藏原始訊息預覽: {e}")
 
-# ================= 新增：處理 Threads 網址 =================
+    # ================= 新增：處理 Threads 網址 =================
     if re.search(THREADS_PATTERN, message.content) and "fixthreads.seria.moe" not in message.content:
         threads_match = re.search(THREADS_PATTERN, message.content)
         if threads_match:
@@ -226,7 +229,7 @@ async def on_message(message):
             except Exception as e:
                 print(f"無法隱藏原始訊息預覽: {e}")
 
-# ================= 新增：處理 Instagram 網址 =================
+    # ================= 新增：處理 Instagram 網址 =================
     # 確保訊息包含 IG 連結，且沒有被代理過 (排除 og/hh/kk)
     if re.search(INSTAGRAM_PATTERN, message.content) and not re.search(r"(og|hh|kk)instagram\.com", message.content):
         ig_match = re.search(INSTAGRAM_PATTERN, message.content)
@@ -250,6 +253,99 @@ async def on_message(message):
                 await message.edit(suppress=True)
             except Exception as e:
                 print(f"無法隱藏原始訊息預覽: {e}")
+
+    # ================= 處理 X / Twitter 網址 =================
+    # 確保訊息包含 X 連結，且沒有被代理過 (排除 vx, fx, fixup, fixvx 等前綴)
+    if re.search(X_PATTERN, message.content) and not re.search(r"(vx|fx|fixupx|fixvx)(x|twitter)\.com",
+                                                               message.content):
+        x_match = re.search(X_PATTERN, message.content)
+        if x_match:
+            raw_x_url = x_match.group(0)
+
+            # 邏輯 4: 將網址轉換為 API 查詢網址 (將 x.com 或 twitter.com 替換為 api.vxtwitter.com)
+            api_url = re.sub(r"(x|twitter)\.com", "api.vxtwitter.com", raw_x_url)
+
+            try:
+                # 請求 API 獲取推文資料
+                response = requests.get(api_url)
+
+                if response.status_code == 200:
+                    tweet_data = response.json()
+
+                    has_media = tweet_data.get("hasMedia", False)
+                    is_sensitive = tweet_data.get("possibly_sensitive", False)
+                    media_extended = tweet_data.get("media_extended", [])
+
+                    # 判斷是否有影片
+                    has_video = any(m.get("type") == "video" for m in media_extended)
+
+                    # 邏輯 7: 沒有媒體 (純文字推文)
+                    if not has_media:
+                        print("此為純文字推文，保留原生預覽 (不做事)。")
+
+                    # 邏輯 9: 有影片，則隨機呼叫代理服務
+                    elif has_video:
+                        # 建立代理伺服器清單
+                        x_proxies = ["fixvx.com", "fixupx.com"]
+                        chosen_proxy = random.choice(x_proxies)
+
+                        # 替換原網址中的網域
+                        domain_match = re.search(r"(x|twitter)\.com", raw_x_url).group(0)
+                        fix_x_url = raw_x_url.replace(domain_match, chosen_proxy)
+
+                        await message.channel.send(f"[📌 X 影片轉址]({fix_x_url})")
+
+                        # 隱藏原始預覽
+                        try:
+                            await message.edit(suppress=True)
+                        except Exception as e:
+                            print(f"無法隱藏原始訊息預覽: {e}")
+
+                    # 邏輯 5 & 8: 有媒體且非影片 (即純圖片推文)
+                    else:
+                        if is_sensitive:
+                            # 邏輯 5: 是圖片且為敏感內容 -> 自製 Embed
+                            # 從 JSON 中提取所需資料 (內文通常已包含 Hashtag)
+                            text = tweet_data.get("text", "")
+                            likes = tweet_data.get("likes", 0)
+                            author_name = tweet_data.get("user_name", "")
+                            author_screen_name = tweet_data.get("user_screen_name", "")
+                            date_epoch = tweet_data.get("date_epoch", 0)
+
+                            # 建立卡片框架
+                            embed = discord.Embed(
+                                description=text,
+                                url=raw_x_url,
+                                color=0x1DA1F2,  # Twitter 藍色
+                                timestamp=datetime.fromtimestamp(date_epoch, timezone.utc)  # 文章時間
+                            )
+
+                            # 設定作者
+                            embed.set_author(name=f"{author_name} (@{author_screen_name})", url=raw_x_url)
+
+                            # 設定圖片 (抓取 media_extended 中的第一張圖片)
+                            if media_extended:
+                                embed.set_image(url=media_extended[0].get("url"))
+
+                            # 邏輯 6: Footer 顯示愛心數量
+                            embed.set_footer(text=f"❤️ {likes}")
+
+                            # 發送自製 Embed 並隱藏原連結預覽
+                            await message.channel.send(embed=embed)
+                            try:
+                                await message.edit(suppress=True)
+                            except Exception as e:
+                                print(f"無法隱藏原始訊息預覽: {e}")
+
+                        else:
+                            # 邏輯 8: 是圖片但非敏感內容
+                            print("此為一般圖片推文，保留原生預覽 (不做事)。")
+
+                else:
+                    print(f"X API 請求失敗，狀態碼: {response.status_code}")
+
+            except Exception as e:
+                print(f"處理 X 網址時發生錯誤: {e}")
 
 
 # 啟動 Bot，請將引號內替換為你的 Token
