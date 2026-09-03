@@ -47,6 +47,8 @@ THREADS_PATTERN = r"(https?://(www\.)?threads\.(net|com)/[^\s]+)"
 INSTAGRAM_PATTERN = r"(https?://(www\.)?instagram\.com/[^\s]+)"
 # 匹配 x.com 或 twitter.com 的貼文網址
 X_PATTERN = r"(https?://(www\.)?(x|twitter)\.com/[^\s]+/status/\d+)"
+# PTT 網址正規表達式
+PTT_PATTERN = r"(https?://(www\.)?ptt\.cc/bbs/([a-zA-Z0-9_-]+)/[M]\.[0-9A-Za-z._-]+\.html)"
 
 
 @client.event
@@ -367,6 +369,103 @@ async def on_message(message):
 
             except Exception as e:
                 print(f"處理 X 網址時發生錯誤: {e}")
+
+    # ================= 處理 PTT 網址 =================
+    if re.search(PTT_PATTERN, message.content):
+        ptt_match = re.search(PTT_PATTERN, message.content)
+        if ptt_match:
+            raw_ptt_url = ptt_match.group(0)
+            board_name = ptt_match.group(3)  # 提取看板名稱
+
+            try:
+                # 必須帶入 over18=1 才能繞過八卦版等 18 禁驗證頁面
+                headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+                cookies = {'over18': '1'}
+
+                response = requests.get(raw_ptt_url, headers=headers, cookies=cookies)
+
+                if response.status_code == 200:
+                    soup = BeautifulSoup(response.text, 'html.parser')
+                    main_content = soup.find('div', id='main-content')
+
+                    if main_content:
+                        # 1. 提取標題與時間 (從 article-metaline 提取)
+                        meta_lines = main_content.find_all('div', class_='article-metaline')
+                        title = "無標題"
+                        post_time = ""
+                        for meta in meta_lines:
+                            tag = meta.find('span', class_='article-meta-tag').text
+                            value = meta.find('span', class_='article-meta-value').text
+                            if tag == '標題':
+                                title = value
+                            elif tag == '時間':
+                                post_time = value
+
+                        # 2. 備份原始 HTML 字串來尋找多媒體網址
+                        raw_html = str(main_content)
+
+                        # 尋找第一張圖片 (支援 jpg, jpeg, png, gif, webp)
+                        image_urls = re.findall(r'https?://[^\s"\'<>]+?\.(?:jpg|jpeg|png|gif|webp)', raw_html,
+                                                re.IGNORECASE)
+                        first_image = image_urls[0] if image_urls else None
+
+                        # 如果沒找到標準附檔名的圖片，嘗試尋找純 imgur 連結並補上 .jpg
+                        if not first_image:
+                            imgur_links = re.findall(r'https?://(?:i\.)?imgur\.com/([a-zA-Z0-9]{5,7})(?!\.\w+)',
+                                                     raw_html)
+                            if imgur_links:
+                                first_image = f"https://i.imgur.com/{imgur_links[0]}.jpg"
+
+                        # 尋找第一個 YouTube 影片網址
+                        yt_urls = re.findall(r'https?://(?:www\.)?(?:youtube\.com/watch\?v=|youtu\.be/)[a-zA-Z0-9_-]+',
+                                             raw_html)
+                        first_yt = yt_urls[0] if yt_urls else None
+
+                        # 3. 淨化內文：移除 Meta 標頭、推文區塊、發信站浮水印等雜訊
+                        for tag in main_content.find_all(['div', 'span']):
+                            class_name = tag.get('class', [])
+                            if 'article-metaline' in class_name or 'article-metaline-right' in class_name or 'push' in class_name or 'f2' in class_name:
+                                tag.extract()  # 將這些元素從 DOM 樹中拔除
+
+                        # 獲取純文字並切除簽名檔 (PTT 簽名檔通常以 -- 開頭)
+                        clean_text = main_content.text.split('--\n')[0].strip()
+
+                        # 擷取前 250 字做為預覽，避免文章過長洗版
+                        if len(clean_text) > 250:
+                            clean_text = clean_text[:250] + "...\n\n(點擊標題閱讀全文)"
+
+                        # 4. 組裝自製 Embed
+                        embed = discord.Embed(
+                            title=title,
+                            url=raw_ptt_url,
+                            description=clean_text if clean_text else "無文字內容",
+                            color=0x2C2F33  # PTT 經典深色
+                        )
+
+                        # 若有圖片，設定為 Embed 的主圖
+                        if first_image:
+                            embed.set_image(url=first_image)
+
+                        # 設定 Footer：包含 PTT 名稱、看板、發文時間
+                        embed.set_footer(text=f"Ptt 批踢踢實業坊  •  {board_name}  •  {post_time}")
+
+                        # 5. 複合發送：如果有 YouTube 網址，將其放置於 content 中一起發送
+                        if first_yt:
+                            await message.channel.send(content=first_yt, embed=embed)
+                        else:
+                            await message.channel.send(embed=embed)
+
+                        # 隱藏使用者發出的原始網址預覽
+                        try:
+                            await message.edit(suppress=True)
+                        except Exception as e:
+                            print(f"無法隱藏原始訊息預覽: {e}")
+
+                else:
+                    print(f"PTT 請求失敗，狀態碼: {response.status_code}")
+
+            except Exception as e:
+                print(f"處理 PTT 網址時發生錯誤: {e}")
 
 
 # 啟動 Bot，請將引號內替換為你的 Token
