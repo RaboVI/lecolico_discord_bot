@@ -289,15 +289,15 @@ async def on_message(message):
                     is_sensitive = tweet_data.get("possibly_sensitive", False)
                     media_extended = tweet_data.get("media_extended", [])
 
-                    # 判斷是否有影片
-                    has_video = any(m.get("type") == "video" for m in media_extended)
+                    # 判斷是否有影片或 GIF
+                    has_video_or_gif = any(m.get("type") in ["video", "gif"] for m in media_extended)
 
                     # 邏輯 7: 沒有媒體 (純文字推文)
                     if not has_media:
                         print("此為純文字推文，保留原生預覽 (不做事)。")
 
                     # 邏輯 9: 有影片，則隨機呼叫代理服務
-                    elif has_video:
+                    elif has_video_or_gif:
                         # 建立代理伺服器清單
                         x_proxies = ["fixvx.com", "fixupx.com"]
                         chosen_proxy = random.choice(x_proxies)
