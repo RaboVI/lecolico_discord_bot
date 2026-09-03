@@ -3,6 +3,7 @@ import re
 import os
 import random
 import requests
+import urllib.parse # <--- 新增此行，用於處理中日文 Hashtag 網址轉碼
 from bs4 import BeautifulSoup
 from datetime import datetime, timezone
 from urllib.parse import urljoin
@@ -11,6 +12,18 @@ from urllib.parse import urljoin
 intents = discord.Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents)
+
+# 建立 Hashtag 自動超連結轉換函式
+def linkify_hashtags(text):
+    def replace_hashtag(match):
+        tag = match.group(1)
+        # 對標籤進行 URL 編碼 (確保中文/日文 Hashtag 連結能正常點擊)
+        encoded_tag = urllib.parse.quote(tag)
+        return f"[#{tag}](https://x.com/hashtag/{encoded_tag})"
+
+    # 正則表達式：匹配獨立的 #標籤 (排除網址內部的 # 符號與標點符號)
+    return re.sub(r'(?<!\S)#([^\s#.,!?:;，。！？]+)', replace_hashtag, text)
+
 
 class ReadButtonView(discord.ui.View):
     def __init__(self, read_url: str):
@@ -306,18 +319,22 @@ async def on_message(message):
                         if is_sensitive:
                             # 邏輯 5: 是圖片且為敏感內容 -> 自製 Embed
                             # 從 JSON 中提取所需資料 (內文通常已包含 Hashtag)
-                            text = tweet_data.get("text", "")
+                            raw_text = tweet_data.get("text", "")
                             likes = tweet_data.get("likes", 0)
+                            views = tweet_data.get("views")  # <--- 正確名稱為複數 views
                             author_name = tweet_data.get("user_name", "")
                             author_screen_name = tweet_data.get("user_screen_name", "")
                             date_epoch = tweet_data.get("date_epoch", 0)
 
-                            # 建立卡片框架
+                            # 1. 將內文中的 Hashtag 轉為超連結
+                            formatted_text = linkify_hashtags(raw_text)
+
+                            # 2. 建立卡片框架
                             embed = discord.Embed(
-                                description=text,
+                                description=formatted_text,
                                 url=raw_x_url,
                                 color=0x1DA1F2,  # Twitter 藍色
-                                timestamp=datetime.fromtimestamp(date_epoch, timezone.utc)  # 文章時間
+                                timestamp=datetime.fromtimestamp(date_epoch, timezone.utc)
                             )
 
                             # 設定作者
@@ -327,8 +344,12 @@ async def on_message(message):
                             if media_extended:
                                 embed.set_image(url=media_extended[0].get("url"))
 
-                            # 邏輯 6: Footer 顯示愛心數量
-                            embed.set_footer(text=f"❤️ {likes}")
+                            # 3. 組合 Footer 文字 (愛心數 + 觀看數，支援千分位格式化)
+                            footer_parts = [f"❤️ {likes:,}"]
+                            if views is not None:
+                                footer_parts.append(f"📷 {views:,}")  # 例如: 📷 12,345
+
+                            embed.set_footer(text="  •  ".join(footer_parts))
 
                             # 發送自製 Embed 並隱藏原連結預覽
                             await message.channel.send(embed=embed)
