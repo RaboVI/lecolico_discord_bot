@@ -449,9 +449,12 @@ async def on_message(message):
                         # 設定 Footer：包含 PTT 名稱、看板、發文時間
                         embed.set_footer(text=f"Ptt 批踢踢實業坊  •  {board_name}  •  {post_time}")
 
-                        # 5. 複合發送：如果有 YouTube 網址，將其放置於 content 中一起發送
+                        # 5. 分開發送：繞過 DC 限制，確保 YT 播放器與 PTT 卡片都能順利顯示
                         if first_yt:
-                            await message.channel.send(content=first_yt, embed=embed)
+                            # 先發送單純的 YT 網址，觸發 Discord 原生影片播放器
+                            await message.channel.send(content=first_yt)
+                            # 接著再送出自製的 PTT 文章預覽卡片
+                            await message.channel.send(embed=embed)
                         else:
                             await message.channel.send(embed=embed)
 
