@@ -428,7 +428,13 @@ async def on_message(message):
                                 tag.extract()  # 將這些元素從 DOM 樹中拔除
 
                         # 獲取純文字並切除簽名檔 (PTT 簽名檔通常以 -- 開頭)
-                        clean_text = main_content.text.split('--\n')[0].strip()
+                        clean_text = main_content.text.split('--\n')[0]
+
+                        # 逐行去除前後空白（PTT 常有隱藏的空格行），並過濾掉純空行
+                        lines = [line.strip() for line in clean_text.splitlines()]
+
+                        # 方案 A（最緊湊，推薦）：完全不保留多餘空行，網址與文字緊密排列
+                        clean_text = "\n".join(line for line in lines if line)
 
                         # 擷取前 250 字做為預覽，避免文章過長洗版
                         if len(clean_text) > 250:
