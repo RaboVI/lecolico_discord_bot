@@ -225,6 +225,8 @@ async def on_message(message):
 
             # 發送隱形字元加換行，讓 Discord 讀取網址產生卡片，但畫面上方不會有明顯網址
             await message.channel.send(f"[Bilifix]({fix_url})")
+            # 使用 asyncio.create_task 在背景執行二次壓抑，不卡住 Bot 主流程
+            asyncio.create_task(suppress_embed_safely(message, delay=2.5))
 
             # 隱藏使用者發送的原始訊息預覽
             try:
@@ -261,6 +263,8 @@ async def on_message(message):
 
             # 由 Bot 發送代理網址以展示完整 Threads 卡片預覽
             await message.channel.send(f"[Threadsfix]({fix_threads_url})")
+            # 使用 asyncio.create_task 在背景執行二次壓抑，不卡住 Bot 主流程
+            asyncio.create_task(suppress_embed_safely(message, delay=2.5))
 
             # 隱藏使用者發送的原始訊息預覽
             try:
@@ -286,6 +290,8 @@ async def on_message(message):
 
             # 發送隱藏網址文字的超連結
             await message.channel.send(f"[IGfix]({fix_ig_url})")
+            # 使用 asyncio.create_task 在背景執行二次壓抑，不卡住 Bot 主流程
+            asyncio.create_task(suppress_embed_safely(message, delay=2.5))
 
             # 隱藏使用者發送的原始訊息預覽
             try:
