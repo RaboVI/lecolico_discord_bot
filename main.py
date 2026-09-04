@@ -3,6 +3,7 @@ import re
 import os
 import random
 import requests
+import asyncio
 import urllib.parse # <--- 新增此行，用於處理中日文 Hashtag 網址轉碼
 from bs4 import BeautifulSoup
 from datetime import datetime, timezone
@@ -12,6 +13,29 @@ from urllib.parse import urljoin
 intents = discord.Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents)
+
+# 定義一個通用的安全隱藏預覽輔助函式：
+async def suppress_embed_safely(message, delay=2.0):
+    """
+    先嘗試隱藏預覽，若 Discord 尚未生成，則等待一段時間後進行二次檢查與壓抑
+    """
+    try:
+        await message.edit(suppress=True)
+    except Exception as e:
+        print(f"首次隱藏預覽失敗: {e}")
+
+    # 等待 Discord 後端完成 Embed 渲染
+    await asyncio.sleep(delay)
+
+    try:
+        # 重新抓取訊息最新狀態
+        fresh_msg = await message.channel.fetch_message(message.id)
+        # 若仍存在原生 embeds 且尚未被壓抑，執行二次壓抑
+        if fresh_msg.embeds and not fresh_msg.flags.suppress_embeds:
+            await fresh_msg.edit(suppress=True)
+    except Exception as e:
+        # 避免訊息已被使用者手動刪除時拋出 NotFound 錯誤
+        pass
 
 # 建立 Hashtag 自動超連結轉換函式
 def linkify_hashtags(text):
@@ -309,6 +333,8 @@ async def on_message(message):
                         fix_x_url = raw_x_url.replace(domain_match, chosen_proxy)
 
                         await message.channel.send(f"[Xfix]({fix_x_url})")
+                        # 使用 asyncio.create_task 在背景執行二次壓抑，不卡住 Bot 主流程
+                        asyncio.create_task(suppress_embed_safely(message, delay=2.5))
 
                         # 隱藏原始預覽
                         try:
