@@ -7,7 +7,6 @@ import asyncio
 import urllib.parse # <--- 新增此行，用於處理中日文 Hashtag 網址轉碼
 from bs4 import BeautifulSoup
 from datetime import datetime, timezone
-from urllib.parse import urljoin
 
 # 設定 Intents 以便讀取訊息內容
 intents = discord.Intents.default()
@@ -225,8 +224,6 @@ async def on_message(message):
 
             # 發送隱形字元加換行，讓 Discord 讀取網址產生卡片，但畫面上方不會有明顯網址
             await message.channel.send(f"[Bilifix]({fix_url})")
-            # 使用 asyncio.create_task 在背景執行二次壓抑，不卡住 Bot 主流程
-            asyncio.create_task(suppress_embed_safely(message, delay=2.5))
 
             # 隱藏使用者發送的原始訊息預覽
             try:
@@ -263,8 +260,6 @@ async def on_message(message):
 
             # 由 Bot 發送代理網址以展示完整 Threads 卡片預覽
             await message.channel.send(f"[Threadsfix]({fix_threads_url})")
-            # 使用 asyncio.create_task 在背景執行二次壓抑，不卡住 Bot 主流程
-            asyncio.create_task(suppress_embed_safely(message, delay=2.5))
 
             # 隱藏使用者發送的原始訊息預覽
             try:
@@ -290,8 +285,6 @@ async def on_message(message):
 
             # 發送隱藏網址文字的超連結
             await message.channel.send(f"[IGfix]({fix_ig_url})")
-            # 使用 asyncio.create_task 在背景執行二次壓抑，不卡住 Bot 主流程
-            asyncio.create_task(suppress_embed_safely(message, delay=2.5))
 
             # 隱藏使用者發送的原始訊息預覽
             try:
@@ -584,9 +577,16 @@ async def on_message(message):
                 target_html_block = str(content_div) if content_div else str(soup)
                 raw_content_text = content_div.text if content_div else ""
 
-                # 擴大範圍搜尋時間字串 (如 2026-09-04 18:19:03)
+                # 擴大範圍搜尋時間字串並重新格式化為 YYYY/MM/DD HH:MM
+                date_str = ""
                 date_match = re.search(r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}', soup.text)
-                date_str = date_match.group(0) if date_match else ""
+                if date_match:
+                    try:
+                        # 解析原始字串如 2026-09-04 18:19:03
+                        dt = datetime.strptime(date_match.group(0), "%Y-%m-%d %H:%M:%S")
+                        date_str = dt.strftime("%Y/%m/%d %H:%M")
+                    except Exception:
+                        date_str = date_match.group(0)
 
             elif "forum.gamer.com.tw" in url:
                 # 哈啦版需特別抓取第一樓
@@ -629,8 +629,8 @@ async def on_message(message):
             lines = [line.strip() for line in raw_content_text.splitlines() if line.strip()]
             clean_text = "\n".join(lines)
 
-            if len(clean_text) > 200:
-                clean_text = clean_text[:200] + "..."
+            if len(clean_text) > 150:
+                clean_text = clean_text[:150] + "..."
 
             # 3. 提取圖片與 YouTube 連結
             block_soup = BeautifulSoup(target_html_block, 'html.parser')
@@ -644,10 +644,6 @@ async def on_message(message):
             # GNN 新聞只取第一張圖
             preview_images = img_urls[:1]
 
-            yt_urls = re.findall(r'https?://(?:www\.)?(?:youtube\.com/watch\?v=|youtu\.be/)[a-zA-Z0-9_-]+',
-                                 target_html_block)
-            first_yt = yt_urls[0] if yt_urls else None
-
             # 4. 組裝 Embed
             embed = discord.Embed(
                 title=title,
@@ -656,10 +652,7 @@ async def on_message(message):
                 color=0x00B4D8
             )
 
-            # 加入 Author 屬性強制撐開卡片寬度，模擬原始排版
-            embed.set_author(name="巴哈姆特電玩資訊站")
-
-            # Footer 取消推薦數
+            # Footer 時間已在第一步格式化完畢
             footer_text = f"巴哈姆特 • {section_name}"
             if date_str:
                 footer_text += f" • {date_str}"
@@ -668,10 +661,6 @@ async def on_message(message):
             # 設定單一主圖
             if preview_images:
                 embed.set_image(url=preview_images[0])
-
-            # 5. 發送訊息 (有YT先發YT，再發Embed)
-            if first_yt:
-                await message.channel.send(content=first_yt)
 
             await message.channel.send(embed=embed)
 
