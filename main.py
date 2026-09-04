@@ -548,6 +548,159 @@ async def on_message(message):
             except Exception as e:
                 print(f"處理 PTT 網址時發生錯誤: {e}")
 
+    # ================= 處理巴哈姆特網址 (GNN / 哈啦版 / 小屋) =================
+    BAHA_PATTERN = r"(https?://(gnn|forum|home)\.gamer\.com\.tw/[^\s]+)"
+
+    if re.search(BAHA_PATTERN, message.content):
+        match = re.search(BAHA_PATTERN, message.content)
+        url = match.group(0)
+
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+            'Cookie': 'BAHAID=discord_bot_preview;'  # 降低被阻擋機率
+        }
+
+        try:
+            res = requests.get(url, headers=headers)
+            res.encoding = 'utf-8'
+            soup = BeautifulSoup(res.text, 'html.parser')
+
+            # 初始化通用變數
+            title = "無標題"
+            raw_content_text = ""
+            tags_list = []
+            gp_count = "-"
+            date_str = ""
+            section_name = ""
+            target_html_block = ""  # 用於限制只在主文中尋找圖片與YT
+
+            # 1. 根據網址特徵進行路由解析
+            if "gnn.gamer.com.tw" in url:
+                section_name = "GNN新聞"
+                title_tag = soup.find('h1')
+                title = title_tag.text.strip() if title_tag else "GNN新聞"
+
+                content_div = soup.find('div', class_='GN-lbox3B')
+                target_html_block = str(content_div) if content_div else str(soup)
+                raw_content_text = content_div.text if content_div else ""
+
+                date_tag = soup.find('div', class_='GN-lbox3A')
+                if date_tag:
+                    date_match = re.search(r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}', date_tag.text)
+                    date_str = date_match.group(0) if date_match else ""
+
+                # GNN 標籤通常在文末
+                tag_div = soup.find('div', class_='GN-lbox3C')
+                if tag_div:
+                    tags_list = [f"#{a.text.strip()}" for a in tag_div.find_all('a')]
+
+            elif "forum.gamer.com.tw" in url:
+                # 哈啦版需特別抓取第一樓
+                first_post = soup.find('section', class_='c-section')
+                target_html_block = str(first_post) if first_post else str(soup)
+
+                title_tag = soup.find('h1', class_='c-post__header__title')
+                title = title_tag.text.strip() if title_tag else "哈啦版文章"
+
+                # 嘗試抓取看板名稱做為 section
+                board_tag = soup.find('a', class_='b-logo')
+                section_name = f"哈啦板 - {board_tag.text.strip()}" if board_tag else "哈啦板"
+
+                if first_post:
+                    content_div = first_post.find('div', class_='c-post__body')
+                    raw_content_text = content_div.text if content_div else ""
+                    date_tag = first_post.find('a', class_='edittime')
+                    date_str = date_tag.text.strip() if date_tag else ""
+                    gp_tag = first_post.find('span', class_='postgp')
+                    gp_count = gp_tag.text.strip() if gp_tag else "-"
+
+            elif "home.gamer.com.tw" in url:
+                section_name = "小屋創作"
+                title_tag = soup.find('h1', class_='TS1')
+                title = title_tag.text.strip() if title_tag else "小屋創作"
+
+                content_div = soup.find('div', class_='MSG-list8C')
+                target_html_block = str(content_div) if content_div else str(soup)
+                raw_content_text = content_div.text if content_div else ""
+
+                date_tag = soup.find('div', class_='ST1')
+                if date_tag:
+                    date_match = re.search(r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}', date_tag.text)
+                    date_str = date_match.group(0) if date_match else ""
+
+                # 嘗試尋找小屋標籤
+                tag_links = soup.find_all('a', href=re.compile(r'tag\.php'))
+                tags_list = [f"#{a.text.strip()}" for a in tag_links]
+
+            # 2. 內文淨化與截斷
+            # 移除常見連續空白與空行
+            lines = [line.strip() for line in raw_content_text.splitlines() if line.strip()]
+            clean_text = "\n".join(lines)
+
+            if len(clean_text) > 200:
+                clean_text = clean_text[:200] + "...\n\n(點擊標題閱讀全文)"
+
+            # 將標籤串接在內文底部
+            if tags_list:
+                clean_text += "\n\n" + " ".join(tags_list[:5])  # 最多顯示 5 個標籤
+
+            # 3. 提取圖片 (支援懶加載 data-src) 與 YouTube 連結
+            # 利用 BeautifulSoup 再次解析目標區塊找圖，避免正則抓到奇怪的東西
+            block_soup = BeautifulSoup(target_html_block, 'html.parser')
+            img_urls = []
+            for img in block_soup.find_all('img'):
+                # 優先抓 data-src，沒有才抓 src
+                src = img.get('data-src') or img.get('src') or ""
+                # 排除巴哈常見的表情符號與 1x1 佔位圖
+                if src and src.startswith('http') and 'emoji' not in src and '1x1.gif' not in src:
+                    if src not in img_urls:
+                        img_urls.append(src)
+
+            preview_images = img_urls[:3]  # 最多 3 張
+
+            # 尋找 YouTube 連結
+            yt_urls = re.findall(r'https?://(?:www\.)?(?:youtube\.com/watch\?v=|youtu\.be/)[a-zA-Z0-9_-]+',
+                                 target_html_block)
+            first_yt = yt_urls[0] if yt_urls else None
+
+            # 4. 組裝 Embed 陣列 (多圖拼貼)
+            embeds = []
+            main_embed = discord.Embed(
+                title=title,
+                url=url,
+                description=clean_text if clean_text else "無文字內容",
+                color=0x00B4D8  # 巴哈姆特藍綠色
+            )
+
+            # Footer 格式化
+            footer_text = f"巴哈姆特 • {section_name} • 推薦: {gp_count}"
+            if date_str:
+                footer_text += f" • {date_str}"
+            main_embed.set_footer(text=footer_text)
+
+            if preview_images:
+                main_embed.set_image(url=preview_images[0])
+            embeds.append(main_embed)
+
+            # 附屬圖片 Embed (達成 2~3 張圖並排)
+            for img_url in preview_images[1:]:
+                sub_embed = discord.Embed(url=url)
+                sub_embed.set_image(url=img_url)
+                embeds.append(sub_embed)
+
+            # 5. 發送訊息與隱藏原生預覽
+            if first_yt:
+                await message.channel.send(content=first_yt)
+
+            await message.channel.send(embeds=embeds)
+
+            # 呼叫你之前建立的非同步壓抑函式
+            import asyncio
+            asyncio.create_task(suppress_embed_safely(message, delay=2.0))
+
+        except Exception as e:
+            print(f"解析巴哈姆特網址時發生錯誤: {e}")
+
 
 # 啟動 Bot，請將引號內替換為你的 Token
 DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN")
