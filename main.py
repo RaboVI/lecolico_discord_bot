@@ -399,7 +399,15 @@ async def on_message(message):
                             if tag == '標題':
                                 title = value
                             elif tag == '時間':
-                                post_time = value
+                                raw_time = value.strip()
+                                try:
+                                    # PTT 時間格式通常為: Fri Sep  4 13:33:05 2026
+                                    # 日期個位數時可能會有連續兩個空格，strptime 的 %a %b %d 會自動容錯處理多個空格
+                                    dt = datetime.strptime(raw_time, "%a %b %d %H:%M:%S %Y")
+                                    post_time = dt.strftime("%Y/%m/%d %H:%M")
+                                except Exception as e:
+                                    # 若時間格式解析異常，退回原始文字
+                                    post_time = raw_time
 
                         # 2. 備份原始 HTML 字串來尋找多媒體網址
                         raw_html = str(main_content)
