@@ -579,19 +579,14 @@ async def on_message(message):
                 title_tag = soup.find('h1')
                 title = title_tag.text.strip() if title_tag else "GNN新聞"
 
+                # 定位內文區塊
                 content_div = soup.find('div', class_='GN-lbox3B')
                 target_html_block = str(content_div) if content_div else str(soup)
                 raw_content_text = content_div.text if content_div else ""
 
-                date_tag = soup.find('div', class_='GN-lbox3A')
-                if date_tag:
-                    date_match = re.search(r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}', date_tag.text)
-                    date_str = date_match.group(0) if date_match else ""
-
-                # GNN 標籤通常在文末
-                tag_div = soup.find('div', class_='GN-lbox3C')
-                if tag_div:
-                    tags_list = [f"#{a.text.strip()}" for a in tag_div.find_all('a')]
+                # 擴大範圍搜尋時間字串 (如 2026-09-04 18:19:03)
+                date_match = re.search(r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}', soup.text)
+                date_str = date_match.group(0) if date_match else ""
 
             elif "forum.gamer.com.tw" in url:
                 # 哈啦版需特別抓取第一樓
@@ -635,63 +630,53 @@ async def on_message(message):
             clean_text = "\n".join(lines)
 
             if len(clean_text) > 200:
-                clean_text = clean_text[:200] + "...\n\n(點擊標題閱讀全文)"
+                clean_text = clean_text[:200] + "..."
 
-            # 將標籤串接在內文底部
-            if tags_list:
-                clean_text += "\n\n" + " ".join(tags_list[:5])  # 最多顯示 5 個標籤
-
-            # 3. 提取圖片 (支援懶加載 data-src) 與 YouTube 連結
-            # 利用 BeautifulSoup 再次解析目標區塊找圖，避免正則抓到奇怪的東西
+            # 3. 提取圖片與 YouTube 連結
             block_soup = BeautifulSoup(target_html_block, 'html.parser')
             img_urls = []
             for img in block_soup.find_all('img'):
-                # 優先抓 data-src，沒有才抓 src
                 src = img.get('data-src') or img.get('src') or ""
-                # 排除巴哈常見的表情符號與 1x1 佔位圖
                 if src and src.startswith('http') and 'emoji' not in src and '1x1.gif' not in src:
                     if src not in img_urls:
                         img_urls.append(src)
 
-            preview_images = img_urls[:3]  # 最多 3 張
+            # GNN 新聞只取第一張圖
+            preview_images = img_urls[:1]
 
-            # 尋找 YouTube 連結
             yt_urls = re.findall(r'https?://(?:www\.)?(?:youtube\.com/watch\?v=|youtu\.be/)[a-zA-Z0-9_-]+',
                                  target_html_block)
             first_yt = yt_urls[0] if yt_urls else None
 
-            # 4. 組裝 Embed 陣列 (多圖拼貼)
-            embeds = []
-            main_embed = discord.Embed(
+            # 4. 組裝 Embed
+            embed = discord.Embed(
                 title=title,
                 url=url,
                 description=clean_text if clean_text else "無文字內容",
-                color=0x00B4D8  # 巴哈姆特藍綠色
+                color=0x00B4D8
             )
 
-            # Footer 格式化
+            # 加入 Author 屬性強制撐開卡片寬度，模擬原始排版
+            embed.set_author(name="巴哈姆特電玩資訊站")
+
+            # Footer 取消推薦數
             footer_text = f"巴哈姆特 • {section_name}"
             if date_str:
                 footer_text += f" • {date_str}"
-            main_embed.set_footer(text=footer_text)
+            embed.set_footer(text=footer_text)
 
+            # 設定單一主圖
             if preview_images:
-                main_embed.set_image(url=preview_images[0])
-            embeds.append(main_embed)
+                embed.set_image(url=preview_images[0])
 
-            # 附屬圖片 Embed (達成 2~3 張圖並排)
-            for img_url in preview_images[1:]:
-                sub_embed = discord.Embed(url=url)
-                sub_embed.set_image(url=img_url)
-                embeds.append(sub_embed)
-
-            # 5. 發送訊息與隱藏原生預覽
+            # 5. 發送訊息 (有YT先發YT，再發Embed)
             if first_yt:
                 await message.channel.send(content=first_yt)
 
-            await message.channel.send(embeds=embeds)
+            await message.channel.send(embed=embed)
 
-            # 呼叫你之前建立的非同步壓抑函式
+            # 隱藏原生預覽
+            import asyncio
             asyncio.create_task(suppress_embed_safely(message, delay=2.0))
 
         except Exception as e:
