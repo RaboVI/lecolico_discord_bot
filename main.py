@@ -424,11 +424,19 @@ async def on_message(message):
                         # 3. 淨化內文：移除 Meta 標頭、推文區塊、發信站浮水印等雜訊
                         for tag in main_content.find_all(['div', 'span']):
                             class_name = tag.get('class', [])
-                            if 'article-metaline' in class_name or 'article-metaline-right' in class_name or 'push' in class_name or 'f2' in class_name:
-                                tag.extract()  # 將這些元素從 DOM 樹中拔除
+                            if any(c in class_name for c in
+                                   ['article-metaline', 'article-metaline-right', 'push', 'f2']):
+                                tag.extract()
 
                         # 獲取純文字並切除簽名檔 (PTT 簽名檔通常以 -- 開頭)
                         clean_text = main_content.text.split('--\n')[0]
+
+                        # --- 關鍵優化 1：移除所有圖片與 YouTube 連結 ---
+                        clean_text = re.sub(r'https?://\S+?\.(?:jpg|jpeg|png|gif|webp)', '', clean_text,
+                                            flags=re.IGNORECASE)
+                        clean_text = re.sub(r'https?://(?:www\.)?(?:youtube\.com/watch\?v=|youtu\.be/)\S+', '',
+                                            clean_text)
+                        clean_text = re.sub(r'https?://(?:i\.)?imgur\.com/[a-zA-Z0-9]{5,7}', '', clean_text)
 
                         # 逐行去除前後空白（PTT 常有隱藏的空格行），並過濾掉純空行
                         lines = [line.strip() for line in clean_text.splitlines()]
@@ -440,31 +448,55 @@ async def on_message(message):
                         if len(clean_text) > 250:
                             clean_text = clean_text[:250] + "...\n\n(點擊標題閱讀全文)"
 
-                        # 4. 組裝自製 Embed
-                        embed = discord.Embed(
+                        # --- 關鍵優化 2：提取前 3 張不重複的圖片 ---
+                        # 收集標準副檔名圖片與純 imgur 圖片
+                        all_img_urls = re.findall(r'https?://[^\s"\'<>]+?\.(?:jpg|jpeg|png|gif|webp)', raw_html,
+                                                  re.IGNORECASE)
+                        imgur_links = re.findall(r'https?://(?:i\.)?imgur\.com/([a-zA-Z0-9]{5,7})(?!\.\w+)', raw_html)
+                        for img_id in imgur_links:
+                            all_img_urls.append(f"https://i.imgur.com/{img_id}.jpg")
+
+                        # 保持順序去重
+                        seen_images = set()
+                        unique_images = []
+                        for img in all_img_urls:
+                            if img not in seen_images:
+                                seen_images.add(img)
+                                unique_images.append(img)
+
+                        # 只取前 3 張
+                        preview_images = unique_images[:3]
+
+                        # --- 關鍵優化 3：組裝多圖 Embed 清單 ---
+                        embeds = []
+
+                        # 主 Embed (包含標題、內文摘要、Footer)
+                        main_embed = discord.Embed(
                             title=title,
                             url=raw_ptt_url,
                             description=clean_text if clean_text else "無文字內容",
-                            color=0x2C2F33  # PTT 經典深色
+                            color=0x2C2F33
                         )
+                        main_embed.set_footer(text=f"Ptt 批踢踢實業坊  •  {board_name}  •  {post_time}")
 
-                        # 若有圖片，設定為 Embed 的主圖
-                        if first_image:
-                            embed.set_image(url=first_image)
+                        if preview_images:
+                            main_embed.set_image(url=preview_images[0])
+                        embeds.append(main_embed)
 
-                        # 設定 Footer：包含 PTT 名稱、看板、發文時間
-                        embed.set_footer(text=f"Ptt 批踢踢實業坊  •  {board_name}  •  {post_time}")
+                        # 第 2、3 張圖片建立為附屬 Embed (必須使用完全相同的 url)
+                        for img_url in preview_images[1:]:
+                            sub_embed = discord.Embed(url=raw_ptt_url)
+                            sub_embed.set_image(url=img_url)
+                            embeds.append(sub_embed)
 
-                        # 5. 分開發送：繞過 DC 限制，確保 YT 播放器與 PTT 卡片都能順利顯示
+                        # 5. 發送處理 (有 YT 先發純網址，接著一次送出所有 embeds)
                         if first_yt:
-                            # 先發送單純的 YT 網址，觸發 Discord 原生影片播放器
                             await message.channel.send(content=first_yt)
-                            # 接著再送出自製的 PTT 文章預覽卡片
-                            await message.channel.send(embed=embed)
+                            await message.channel.send(embeds=embeds)
                         else:
-                            await message.channel.send(embed=embed)
+                            await message.channel.send(embeds=embeds)
 
-                        # 隱藏使用者發出的原始網址預覽
+                        # 隱藏使用者發送的原始預覽
                         try:
                             await message.edit(suppress=True)
                         except Exception as e:
