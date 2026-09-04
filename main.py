@@ -652,8 +652,11 @@ async def on_message(message):
                 color=0x00B4D8
             )
 
+            # 新增固定的 Thumbnail 縮圖
+            embed.set_thumbnail(url="https://i.meee.com.tw/wRZjeCX.png")
+
             # Footer 時間已在第一步格式化完畢
-            footer_text = f"巴哈姆特 • {section_name}"
+            footer_text = f"{section_name}"
             if date_str:
                 footer_text += f" • {date_str}"
             embed.set_footer(text=footer_text)
