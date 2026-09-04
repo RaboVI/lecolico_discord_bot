@@ -569,7 +569,6 @@ async def on_message(message):
             title = "無標題"
             raw_content_text = ""
             tags_list = []
-            gp_count = "-"
             date_str = ""
             section_name = ""
             target_html_block = ""  # 用於限制只在主文中尋找圖片與YT
@@ -611,8 +610,6 @@ async def on_message(message):
                     raw_content_text = content_div.text if content_div else ""
                     date_tag = first_post.find('a', class_='edittime')
                     date_str = date_tag.text.strip() if date_tag else ""
-                    gp_tag = first_post.find('span', class_='postgp')
-                    gp_count = gp_tag.text.strip() if gp_tag else "-"
 
             elif "home.gamer.com.tw" in url:
                 section_name = "小屋創作"
@@ -673,7 +670,7 @@ async def on_message(message):
             )
 
             # Footer 格式化
-            footer_text = f"巴哈姆特 • {section_name} • 推薦: {gp_count}"
+            footer_text = f"巴哈姆特 • {section_name}"
             if date_str:
                 footer_text += f" • {date_str}"
             main_embed.set_footer(text=footer_text)
@@ -695,7 +692,6 @@ async def on_message(message):
             await message.channel.send(embeds=embeds)
 
             # 呼叫你之前建立的非同步壓抑函式
-            import asyncio
             asyncio.create_task(suppress_embed_safely(message, delay=2.0))
 
         except Exception as e:
