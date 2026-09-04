@@ -589,22 +589,81 @@ async def on_message(message):
                         date_str = date_match.group(0)
 
             elif "forum.gamer.com.tw" in url:
-                # 哈啦版需特別抓取第一樓
+                section_name = "哈啦板"
+
+                # 1. 抓取第一樓 (主文區塊)
                 first_post = soup.find('section', class_='c-section')
-                target_html_block = str(first_post) if first_post else str(soup)
-
-                title_tag = soup.find('h1', class_='c-post__header__title')
-                title = title_tag.text.strip() if title_tag else "哈啦版文章"
-
-                # 嘗試抓取看板名稱做為 section
-                board_tag = soup.find('a', class_='b-logo')
-                section_name = f"哈啦板 - {board_tag.text.strip()}" if board_tag else "哈啦板"
 
                 if first_post:
-                    content_div = first_post.find('div', class_='c-post__body')
-                    raw_content_text = content_div.text if content_div else ""
+                    # 2. 獨立提取標題與時間
+                    title_tag = first_post.find('h1', class_='c-post__header__title')
+                    title = title_tag.text.strip() if title_tag else "哈啦版文章"
+
                     date_tag = first_post.find('a', class_='edittime')
                     date_str = date_tag.text.strip() if date_tag else ""
+
+                    # 3. 精確定位純內文區塊 (完美排除簽名檔與作者資訊)
+                    article_content = first_post.find('div', class_='c-article__content')
+                    target_html_block = str(article_content) if article_content else ""
+                    raw_content_text = article_content.text if article_content else ""
+
+                    # 4. 內文淨化與截斷
+                    lines = [line.strip() for line in raw_content_text.splitlines() if line.strip()]
+                    clean_text = "\n".join(lines)
+
+                    if len(clean_text) > 200:
+                        clean_text = clean_text[:200] + "..."
+
+                    # 5. 提取圖片 (支援懶加載) 與 YouTube 連結
+                    block_soup = BeautifulSoup(target_html_block, 'html.parser')
+                    img_urls = []
+                    for img in block_soup.find_all('img'):
+                        src = img.get('data-src') or img.get('src') or ""
+                        if src and src.startswith('http') and 'emoji' not in src and '1x1.gif' not in src:
+                            if src not in img_urls:
+                                img_urls.append(src)
+
+                    # 保留最多 3 張圖供 Discord 拼貼
+                    preview_images = img_urls[:3]
+
+                    yt_urls = re.findall(r'https?://(?:www\.)?(?:youtube\.com/watch\?v=|youtu\.be/)[a-zA-Z0-9_-]+',
+                                         target_html_block)
+                    first_yt = yt_urls[0] if yt_urls else None
+
+                    # 6. 組裝 Embed 陣列
+                    embeds = []
+                    main_embed = discord.Embed(
+                        title=title,
+                        url=url,
+                        description=clean_text if clean_text else "無文字內容",
+                        color=0x00B4D8
+                    )
+
+                    # 組合 Footer
+                    footer_text = f"巴哈姆特 • {section_name}"
+                    if date_str:
+                        footer_text += f" • {date_str}"
+                    main_embed.set_footer(text=footer_text)
+
+                    if preview_images:
+                        main_embed.set_image(url=preview_images[0])
+                    embeds.append(main_embed)
+
+                    # 將第 2、3 張圖建立為附屬 Embed 以觸發拼圖效果
+                    for img_url in preview_images[1:]:
+                        sub_embed = discord.Embed(url=url)
+                        sub_embed.set_image(url=img_url)
+                        embeds.append(sub_embed)
+
+                    # 7. 發送訊息
+                    if first_yt:
+                        await message.channel.send(content=first_yt)
+
+                    await message.channel.send(embeds=embeds)
+
+                    # 觸發非同步預覽壓抑
+                    import asyncio
+                    asyncio.create_task(suppress_embed_safely(message, delay=2.0))
 
             elif "home.gamer.com.tw" in url:
                 section_name = "小屋創作"
@@ -632,7 +691,7 @@ async def on_message(message):
             if len(clean_text) > 150:
                 clean_text = clean_text[:150] + "..."
 
-            # 3. 提取圖片與 YouTube 連結
+            # 3. 提取圖片
             block_soup = BeautifulSoup(target_html_block, 'html.parser')
             img_urls = []
             for img in block_soup.find_all('img'):
