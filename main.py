@@ -611,9 +611,15 @@ async def on_message(message):
 
             # ================= 2. 哈啦版處理 =================
             elif "forum.gamer.com.tw" in url:
-                # 透過 data-gtm 屬性精準定位看板名稱 (例如: 鳴潮)
+                # 嘗試透過 data-gtm 定位，優先抓取 title 屬性
                 board_tag = soup.find('a', attrs={'data-gtm': '選單-看板名稱'})
-                section_name = board_tag.text.strip() if board_tag else "哈啦板"
+                if board_tag and board_tag.get('title'):
+                    section_name = board_tag.get('title').strip()
+                else:
+                    # 絕對備用方案：從網頁 <title> 標籤提取 (格式通常為 "文章標題 @看板名稱 哈啦板 - 巴哈姆特")
+                    page_title = soup.find('title').text if soup.find('title') else ""
+                    board_match = re.search(r'@(.*?)\s+哈啦板', page_title)
+                    section_name = board_match.group(1).strip() if board_match else "哈啦板"
 
                 first_post = soup.find('section', class_='c-section')
 
