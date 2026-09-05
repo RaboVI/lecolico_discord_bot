@@ -778,8 +778,14 @@ async def on_message(message):
                 else:
                     clean_text = ""
 
+                # (e) 安全截斷：避免切斷 Markdown 超連結
                 if len(clean_text) > 150:
-                    clean_text = clean_text[:150] + "..."
+                    clean_text = clean_text[:150]
+                    # 檢查並移除尾部不完整的 [文字... 或是 [文字](網址...
+                    clean_text = re.sub(r'\[[^\]]*$|\[[^\]]*\]\([^)]*$', '', clean_text).strip()
+                    # 移除可能殘留的清單符號 (例如獨立的 - 或 *)
+                    clean_text = re.sub(r'[-*]+$', '', clean_text).strip()
+                    clean_text += "..."
 
                 # 4. 提取圖片 (包含頂部插畫大圖與內文圖片)
                 img_urls = []
