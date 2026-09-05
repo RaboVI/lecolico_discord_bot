@@ -611,7 +611,10 @@ async def on_message(message):
 
             # ================= 2. 哈啦版處理 =================
             elif "forum.gamer.com.tw" in url:
-                section_name = "哈啦板"
+                # 動態抓取看板名稱 (例如: 鳴潮)
+                board_tag = soup.find('a', href=re.compile(r'A\.php\?bsn='))
+                section_name = board_tag.get('title') or board_tag.text.strip() if board_tag else "哈啦板"
+
                 first_post = soup.find('section', class_='c-section')
 
                 if first_post:
@@ -623,10 +626,16 @@ async def on_message(message):
 
                     article_content = first_post.find('div', class_='c-article__content')
                     target_html_block = str(article_content) if article_content else ""
-                    raw_content_text = article_content.text if article_content else ""
 
-                    lines = [line.strip() for line in raw_content_text.splitlines() if line.strip()]
-                    clean_text = "\n".join(lines)
+                    # 處理內文：過濾 HTML 標籤後，壓縮連續換行為單一換行
+                    if article_content:
+                        # 取得純文字並移除頭尾空白
+                        raw_text = article_content.text.strip()
+                        # 將 2 個以上的連續換行壓縮為 1 個換行
+                        clean_text = re.sub(r'\n{2,}', '\n', raw_text)
+                    else:
+                        clean_text = ""
+
                     if len(clean_text) > 200:
                         clean_text = clean_text[:200] + "..."
 
@@ -641,7 +650,7 @@ async def on_message(message):
                         # 嚴格排除巴哈貼圖與表情符號
                         if 'smilie' in class_name or 'emoji' in class_name:
                             continue
-                        if 'plugins/smiles' in src or 'forum/smiles' in src:
+                        if 'plugins/smiles' in src or 'forum/smiles' in src or 'editor/emotion' in src:
                             continue
 
                         if src and src.startswith('http') and '1x1.gif' not in src:
@@ -653,7 +662,7 @@ async def on_message(message):
                     # 尋找 iframe 內的 YouTube 連結
                     first_yt = None
                     yt_iframe = block_soup.find('iframe', attrs={'src': re.compile(r'youtube\.com/embed/')})
-                    if not yt_iframe:  # 預防懶加載，嘗試尋找 data-src
+                    if not yt_iframe:
                         yt_iframe = block_soup.find('iframe', attrs={'data-src': re.compile(r'youtube\.com/embed/')})
 
                     if yt_iframe:
@@ -662,7 +671,7 @@ async def on_message(message):
                         if match:
                             first_yt = f"https://www.youtube.com/watch?v={match.group(1)}"
 
-                    # 備用方案：如果不是 iframe，而是直接貼上的純網址
+                    # 備用方案
                     if not first_yt:
                         yt_urls = re.findall(r'https?://(?:www\.)?(?:youtube\.com/watch\?v=|youtu\.be/)[a-zA-Z0-9_-]+',
                                              target_html_block)
@@ -677,6 +686,7 @@ async def on_message(message):
                         color=0x00B4D8
                     )
 
+                    # 組合 Footer (巴哈姆特 • 看板名稱 • 時間)
                     footer_text = f"巴哈姆特 • {section_name}"
                     if date_str:
                         footer_text += f" • {date_str}"
