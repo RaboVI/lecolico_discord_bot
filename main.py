@@ -333,6 +333,7 @@ async def on_message(message):
 
                         await message.channel.send(f"[Xfix]({fix_x_url})")
                         # 使用 asyncio.create_task 在背景執行二次壓抑，不卡住 Bot 主流程
+                        import asyncio
                         asyncio.create_task(suppress_embed_safely(message, delay=3.0))
 
                         # 隱藏原始預覽
@@ -642,8 +643,8 @@ async def on_message(message):
                     else:
                         clean_text = ""
 
-                    if len(clean_text) > 150:
-                        clean_text = clean_text[:150] + "..."
+                    if len(clean_text) > 100:
+                        clean_text = clean_text[:100] + "..."
 
                     block_soup = BeautifulSoup(target_html_block, 'html.parser')
 
