@@ -549,11 +549,15 @@ async def on_message(message):
         match = re.search(BAHA_PATTERN, message.content)
         url = match.group(0)
 
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
-            # 在 Cookie 中加入 ckR18=1，向巴哈姆特伺服器宣告已滿 18 歲
-            'Cookie': 'BAHAID=discord_bot_preview; ckR18=1;'  # 降低被阻擋機率
-        }
+        # 動態切換 Header，保護真實帳號安全
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+
+        if "home.gamer.com.tw" in url:
+            # 小屋創作：從環境變數讀取真實 Cookie，若未設定則預設帶入 ckR18=1
+            headers['Cookie'] = os.environ.get("BAHA_HOME_COOKIE", "ckR18=1;")
+        else:
+            # GNN/哈啦版：使用匿名預覽身分，避免頻繁請求導致本尊帳號受影響
+            headers['Cookie'] = 'BAHAID=discord_bot_preview; ckR18=1;'
 
         try:
             res = requests.get(url, headers=headers)
@@ -719,11 +723,27 @@ async def on_message(message):
             elif "home.gamer.com.tw" in url:
                 section_name = "小屋創作"
 
-                # 1. 抓取標題
+                # 防呆機制：檢查是否被擋在權限牆外 (找不到內文區塊)
+                article_content = soup.find('div', id='article_content')
+
+                if not article_content:
+                    # 觸發隱私提示，不再往下解析
+                    embed = discord.Embed(
+                        title="🔒 限制級或私密內容",
+                        url=url,
+                        description="此小屋創作設有年齡限制、好友限定或已被刪除，請直接點擊標題前往網頁觀看。",
+                        color=0x2C2F33
+                    )
+                    await message.channel.send(embed=embed)
+
+                    return  # 提前結束該次事件
+
+                # --- 以下為成功取得真實內容的正常解析邏輯 ---
+                target_html_block = str(article_content)
+
                 title_tag = soup.find('h1', class_='article-title')
                 title = title_tag.text.strip() if title_tag else "小屋創作"
 
-                # 2. 精準抓取時間：尋找包含日期格式的 caption-text
                 date_str = ""
                 for span in soup.find_all('span', class_='caption-text'):
                     date_match = re.search(r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}', span.text)
@@ -732,66 +752,45 @@ async def on_message(message):
                             dt = datetime.strptime(date_match.group(0), "%Y-%m-%d %H:%M:%S")
                             date_str = dt.strftime("%Y/%m/%d %H:%M")
                         except Exception:
-                                date_str = date_match.group(0)
-                        break  # 找到時間就停止迴圈
+                            date_str = date_match.group(0)
+                        break
 
-                # 3. 抓取內文，並修復超連結與精準分段
-                article_content = soup.find('div', id='article_content')
-                target_html_block = str(article_content) if article_content else ""
+                import urllib.parse
 
-                if article_content:
-                    import urllib.parse
+                # 轉換 Markdown 超連結
+                for a in article_content.find_all('a'):
+                    href = a.get('href', '')
+                    if 'redir.php?url=' in href:
+                        try:
+                            encoded_url = href.split('redir.php?url=')[1].split('&')[0]
+                            href = urllib.parse.unquote(encoded_url)
+                        except:
+                            pass
 
-                    # (a) 優先將超連結轉換為 Markdown 格式 [文字](網址)
-                    for a in article_content.find_all('a'):
-                        href = a.get('href', '')
+                    link_text = a.get_text(separator='').strip()
+                    if link_text and href.startswith('http'):
+                        a.replace_with(f"[{link_text}]({href})")
+                    else:
+                        a.unwrap()
 
-                        # 解除巴哈姆特的外部跳轉包裝 (redir.php?url=...)
-                        if 'redir.php?url=' in href:
-                            try:
-                                # 取出 url= 後面的部分並進行 URL 解碼
-                                encoded_url = href.split('redir.php?url=')[1].split('&')[0]
-                                href = urllib.parse.unquote(encoded_url)
-                            except:
-                                pass
+                        # 處理換行
+                for br in article_content.find_all('br'):
+                    br.replace_with('\n')
+                for div in article_content.find_all(['div', 'p']):
+                    div.append('\n')
 
-                        # 取得超連結內的文字 (無視內部的 font 標籤)
-                        link_text = a.get_text(separator='').strip()
+                # 提取純文字並安全截斷
+                raw_text = article_content.get_text(separator='').strip()
+                clean_text = re.sub(r'\n{2,}', '\n', raw_text)
 
-                        if link_text and href.startswith('http'):
-                            a.replace_with(f"[{link_text}]({href})")
-                        else:
-                            # 空連結或是非 http 連結，直接解除包裝保留文字
-                            a.unwrap()
-
-                            # (b) 處理換行：取代 br 並在 div 結尾補上換行
-                    for br in article_content.find_all('br'):
-                        br.replace_with('\n')
-
-                    for div in article_content.find_all(['div', 'p']):
-                        div.append('\n')
-
-                    # (c) 提取純文字：設定 separator='' 讓同行文字無縫合併
-                    raw_text = article_content.get_text(separator='').strip()
-
-                    # (d) 壓縮多餘的連續換行為單一換行
-                    clean_text = re.sub(r'\n{2,}', '\n', raw_text)
-                else:
-                    clean_text = ""
-
-                # (e) 安全截斷：避免切斷 Markdown 超連結
                 if len(clean_text) > 150:
                     clean_text = clean_text[:150]
-                    # 檢查並移除尾部不完整的 [文字... 或是 [文字](網址...
+                    # 避免切斷 Markdown 語法
                     clean_text = re.sub(r'\[[^\]]*$|\[[^\]]*\]\([^)]*$', '', clean_text).strip()
-                    # 移除可能殘留的清單符號 (例如獨立的 - 或 *)
                     clean_text = re.sub(r'[-*]+$', '', clean_text).strip()
                     clean_text += "..."
 
-                # 4. 提取圖片 (包含頂部插畫大圖與內文圖片)
                 img_urls = []
-
-                # 優先抓取置頂的插畫大圖
                 illustration_div = soup.find('div', id='div_illustration')
                 if illustration_div:
                     for img in illustration_div.find_all('img'):
@@ -799,7 +798,6 @@ async def on_message(message):
                         if src and src.startswith('http'):
                             img_urls.append(src)
 
-                # 接著過濾內文圖片與表情符號
                 block_soup = BeautifulSoup(target_html_block, 'html.parser')
                 for img in block_soup.find_all('img'):
                     src = img.get('data-src') or img.get('src') or ""
@@ -814,10 +812,8 @@ async def on_message(message):
                         if src not in img_urls:
                             img_urls.append(src)
 
-                # 支援多圖拼貼展示 (最多3張)
                 preview_images = img_urls[:3]
 
-                # 5. 組裝 Embed 陣列
                 embeds = []
                 main_embed = discord.Embed(
                     title=title,
@@ -826,7 +822,6 @@ async def on_message(message):
                     color=0x00B4D8
                 )
 
-                # 組合 Footer
                 footer_text = f"巴哈姆特 • {section_name}"
                 if date_str:
                     footer_text += f" • {date_str}"
@@ -843,14 +838,11 @@ async def on_message(message):
 
                 await message.channel.send(embeds=embeds)
 
-                # 觸發非同步預覽壓抑
                 import asyncio
-                asyncio.create_task(suppress_embed_safely(message, delay=3.0))
-
+                asyncio.create_task(suppress_embed_safely(message, delay=2.5))
 
         except Exception as e:
             print(f"解析巴哈姆特網址時發生錯誤: {e}")
-
 
 # 啟動 Bot，請將引號內替換為你的 Token
 DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN")
