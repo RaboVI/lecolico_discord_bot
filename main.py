@@ -778,8 +778,8 @@ async def on_message(message):
                 else:
                     clean_text = ""
 
-                if len(clean_text) > 100:
-                    clean_text = clean_text[:100] + "..."
+                if len(clean_text) > 150:
+                    clean_text = clean_text[:150] + "..."
 
                 # 4. 提取圖片 (包含頂部插畫大圖與內文圖片)
                 img_urls = []
