@@ -717,50 +717,96 @@ async def on_message(message):
             # ================= 3. 小屋創作處理 =================
             elif "home.gamer.com.tw" in url:
                 section_name = "小屋創作"
-                title_tag = soup.find('h1', class_='TS1')
+
+                # 1. 抓取標題
+                title_tag = soup.find('h1', class_='article-title')
                 title = title_tag.text.strip() if title_tag else "小屋創作"
 
-                content_div = soup.find('div', class_='MSG-list8C')
-                target_html_block = str(content_div) if content_div else str(soup)
-                raw_content_text = content_div.text if content_div else ""
-
-                date_tag = soup.find('div', class_='ST1')
+                # 2. 精準抓取時間：尋找包含日期格式的 caption-text
                 date_str = ""
-                if date_tag:
-                    date_match = re.search(r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}', date_tag.text)
-                    date_str = date_match.group(0) if date_match else ""
+                for span in soup.find_all('span', class_='caption-text'):
+                    date_match = re.search(r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}', span.text)
+                    if date_match:
+                        try:
+                            dt = datetime.strptime(date_match.group(0), "%Y-%m-%d %H:%M:%S")
+                            date_str = dt.strftime("%Y/%m/%d %H:%M")
+                        except Exception:
+                                date_str = date_match.group(0)
+                        break  # 找到時間就停止迴圈
 
-                lines = [line.strip() for line in raw_content_text.splitlines() if line.strip()]
-                clean_text = "\n".join(lines)
+                # 3. 抓取內文並無視 <font> 標籤
+                article_content = soup.find('div', id='article_content')
+                target_html_block = str(article_content) if article_content else ""
+
+                if article_content:
+                    # get_text 會自動剝除所有 <font> 等標籤並提取純文字
+                    raw_text = article_content.get_text(separator='\n').strip()
+                    clean_text = re.sub(r'\n{2,}', '\n', raw_text)
+                else:
+                    clean_text = ""
+
                 if len(clean_text) > 150:
                     clean_text = clean_text[:150] + "..."
 
-                block_soup = BeautifulSoup(target_html_block, 'html.parser')
+                # 4. 提取圖片 (包含頂部插畫大圖與內文圖片)
                 img_urls = []
+
+                # 優先抓取置頂的插畫大圖
+                illustration_div = soup.find('div', id='div_illustration')
+                if illustration_div:
+                    for img in illustration_div.find_all('img'):
+                        src = img.get('data-src') or img.get('src') or ""
+                        if src and src.startswith('http'):
+                            img_urls.append(src)
+
+                # 接著過濾內文圖片與表情符號
+                block_soup = BeautifulSoup(target_html_block, 'html.parser')
                 for img in block_soup.find_all('img'):
                     src = img.get('data-src') or img.get('src') or ""
-                    if src and src.startswith('http') and 'emoji' not in src and '1x1.gif' not in src:
+                    class_name = " ".join(img.get('class', [])).lower()
+
+                    if 'smilie' in class_name or 'emoji' in class_name:
+                        continue
+                    if 'plugins/smiles' in src or 'forum/smiles' in src or 'editor/emotion' in src:
+                        continue
+
+                    if src and src.startswith('http') and '1x1.gif' not in src:
                         if src not in img_urls:
                             img_urls.append(src)
 
-                embed = discord.Embed(
+                # 支援多圖拼貼展示 (最多3張)
+                preview_images = img_urls[:3]
+
+                # 5. 組裝 Embed 陣列
+                embeds = []
+                main_embed = discord.Embed(
                     title=title,
                     url=url,
                     description=clean_text if clean_text else "無文字內容",
                     color=0x00B4D8
                 )
 
+                # 組合 Footer
                 footer_text = f"巴哈姆特 • {section_name}"
                 if date_str:
                     footer_text += f" • {date_str}"
-                embed.set_footer(text=footer_text)
+                main_embed.set_footer(text=footer_text)
 
-                if img_urls:
-                    embed.set_image(url=img_urls[0])
+                if preview_images:
+                    main_embed.set_image(url=preview_images[0])
+                embeds.append(main_embed)
 
-                await message.channel.send(embed=embed)
+                for img_url in preview_images[1:]:
+                    sub_embed = discord.Embed(url=url)
+                    sub_embed.set_image(url=img_url)
+                    embeds.append(sub_embed)
+
+                await message.channel.send(embeds=embeds)
+
+                # 觸發非同步預覽壓抑
                 import asyncio
                 asyncio.create_task(suppress_embed_safely(message, delay=2.0))
+
 
         except Exception as e:
             print(f"解析巴哈姆特網址時發生錯誤: {e}")
