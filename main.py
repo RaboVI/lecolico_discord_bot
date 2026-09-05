@@ -261,6 +261,9 @@ async def on_message(message):
             # 由 Bot 發送代理網址以展示完整 Threads 卡片預覽
             await message.channel.send(f"[Threadsfix]({fix_threads_url})")
 
+            import asyncio
+            asyncio.create_task(suppress_embed_safely(message, delay=2.5))
+
             # 隱藏使用者發送的原始訊息預覽
             try:
                 await message.edit(suppress=True)
@@ -381,6 +384,10 @@ async def on_message(message):
 
                             # 發送自製 Embed 並隱藏原連結預覽
                             await message.channel.send(embed=embed)
+                            # 使用 asyncio.create_task 在背景執行二次壓抑，不卡住 Bot 主流程
+                            import asyncio
+                            asyncio.create_task(suppress_embed_safely(message, delay=2.5))
+
                             try:
                                 await message.edit(suppress=True)
                             except Exception as e:
@@ -530,6 +537,10 @@ async def on_message(message):
                         else:
                             await message.channel.send(embeds=embeds)
 
+                        # 使用 asyncio.create_task 在背景執行二次壓抑，不卡住 Bot 主流程
+                        import asyncio
+                        asyncio.create_task(suppress_embed_safely(message, delay=2.5))
+
                         # 隱藏使用者發送的原始預覽
                         try:
                             await message.edit(suppress=True)
@@ -553,11 +564,11 @@ async def on_message(message):
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
 
         if "home.gamer.com.tw" in url:
-            # 小屋創作：從環境變數讀取真實 Cookie，若未設定則預設帶入 ckR18=1
-            headers['Cookie'] = os.environ.get("BAHA_HOME_COOKIE", "ckR18=1;")
+            # 小屋創作：從環境變數讀取真實 Cookie，若未設定則預設帶入 age_limit_content=1
+            headers['Cookie'] = os.environ.get("BAHA_HOME_COOKIE", "age_limit_content=1;")
         else:
             # GNN/哈啦版：使用匿名預覽身分，避免頻繁請求導致本尊帳號受影響
-            headers['Cookie'] = 'BAHAID=discord_bot_preview; ckR18=1;'
+            headers['Cookie'] = 'BAHAID=discord_bot_preview; age_limit_content=1;'
 
         try:
             res = requests.get(url, headers=headers)
