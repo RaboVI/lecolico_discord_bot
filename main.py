@@ -551,7 +551,8 @@ async def on_message(message):
 
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
-            'Cookie': 'BAHAID=discord_bot_preview;'  # 降低被阻擋機率
+            # 在 Cookie 中加入 ckR18=1，向巴哈姆特伺服器宣告已滿 18 歲
+            'Cookie': 'BAHAID=discord_bot_preview; ckR18=1;'  # 降低被阻擋機率
         }
 
         try:
@@ -844,7 +845,7 @@ async def on_message(message):
 
                 # 觸發非同步預覽壓抑
                 import asyncio
-                asyncio.create_task(suppress_embed_safely(message, delay=2.0))
+                asyncio.create_task(suppress_embed_safely(message, delay=3.0))
 
 
         except Exception as e:
