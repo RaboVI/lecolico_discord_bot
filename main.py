@@ -734,19 +734,52 @@ async def on_message(message):
                                 date_str = date_match.group(0)
                         break  # 找到時間就停止迴圈
 
-                # 3. 抓取內文並無視 <font> 標籤
+                # 3. 抓取內文，並修復超連結與精準分段
                 article_content = soup.find('div', id='article_content')
                 target_html_block = str(article_content) if article_content else ""
 
                 if article_content:
-                    # get_text 會自動剝除所有 <font> 等標籤並提取純文字
-                    raw_text = article_content.get_text(separator='\n').strip()
+                    import urllib.parse
+
+                    # (a) 優先將超連結轉換為 Markdown 格式 [文字](網址)
+                    for a in article_content.find_all('a'):
+                        href = a.get('href', '')
+
+                        # 解除巴哈姆特的外部跳轉包裝 (redir.php?url=...)
+                        if 'redir.php?url=' in href:
+                            try:
+                                # 取出 url= 後面的部分並進行 URL 解碼
+                                encoded_url = href.split('redir.php?url=')[1].split('&')[0]
+                                href = urllib.parse.unquote(encoded_url)
+                            except:
+                                pass
+
+                        # 取得超連結內的文字 (無視內部的 font 標籤)
+                        link_text = a.get_text(separator='').strip()
+
+                        if link_text and href.startswith('http'):
+                            a.replace_with(f"[{link_text}]({href})")
+                        else:
+                            # 空連結或是非 http 連結，直接解除包裝保留文字
+                            a.unwrap()
+
+                            # (b) 處理換行：取代 br 並在 div 結尾補上換行
+                    for br in article_content.find_all('br'):
+                        br.replace_with('\n')
+
+                    for div in article_content.find_all(['div', 'p']):
+                        div.append('\n')
+
+                    # (c) 提取純文字：設定 separator='' 讓同行文字無縫合併
+                    raw_text = article_content.get_text(separator='').strip()
+
+                    # (d) 壓縮多餘的連續換行為單一換行
                     clean_text = re.sub(r'\n{2,}', '\n', raw_text)
                 else:
                     clean_text = ""
 
-                if len(clean_text) > 150:
-                    clean_text = clean_text[:150] + "..."
+                if len(clean_text) > 100:
+                    clean_text = clean_text[:100] + "..."
 
                 # 4. 提取圖片 (包含頂部插畫大圖與內文圖片)
                 img_urls = []
