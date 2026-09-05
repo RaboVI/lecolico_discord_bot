@@ -564,11 +564,11 @@ async def on_message(message):
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
 
         if "home.gamer.com.tw" in url:
-            # 小屋創作：從環境變數讀取真實 Cookie，若未設定則預設帶入 age_limit_content=1
-            headers['Cookie'] = os.environ.get("BAHA_HOME_COOKIE", "age_limit_content=1;")
+            # 小屋創作：從環境變數讀取真實 Cookie，若未設定則預設帶入 ckR18=1
+            headers['Cookie'] = os.environ.get("BAHA_HOME_COOKIE", "ckR18=1;")
         else:
             # GNN/哈啦版：使用匿名預覽身分，避免頻繁請求導致本尊帳號受影響
-            headers['Cookie'] = 'BAHAID=discord_bot_preview; age_limit_content=1;'
+            headers['Cookie'] = 'BAHAID=discord_bot_preview; ckR18=1;'
 
         try:
             res = requests.get(url, headers=headers)
