@@ -12,12 +12,14 @@ from datetime import datetime, timezone
 intents = discord.Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents)
+pending_suppress_ids = set()    # 追蹤「Bot 已經自己產生過 Embed」的訊息 ID
+# 用途：讓 on_message_edit 知道，如果 Discord 之後才把原生預覽貼到這則訊息上，
+# 要主動把它隱藏掉——不再靠固定延遲去「賭」時間點
 
 # 定義一個通用的安全隱藏預覽輔助函式：
-async def suppress_embed_safely(message, delay=2.0):
-    """
-    先嘗試隱藏預覽，若 Discord 尚未生成，則等待一段時間後進行二次檢查與壓抑
-    """
+"""async def suppress_embed_safely(message, delay=2.0):
+    # 先嘗試隱藏預覽，若 Discord 尚未生成，則等待一段時間後進行二次檢查與壓抑
+    
     try:
         await message.edit(suppress=True)
     except Exception as e:
@@ -35,6 +37,7 @@ async def suppress_embed_safely(message, delay=2.0):
     except Exception as e:
         # 避免訊息已被使用者手動刪除時拋出 NotFound 錯誤
         pass
+"""
 
 # 建立 Hashtag 自動超連結轉換函式
 def linkify_hashtags(text):
@@ -77,6 +80,23 @@ PTT_PATTERN = r"(https?://(www\.)?ptt\.cc/bbs/([a-zA-Z0-9_-]+)/[M]\.[0-9A-Za-z._
 @client.event
 async def on_ready():
     print(f'Bot 已成功登入為 {client.user}')
+
+
+@client.event
+async def on_message_edit(before, after):
+    # 只處理清單裡有記錄的訊息，其餘一律不干涉（例如使用者自己編輯了文字）
+    if after.id not in pending_suppress_ids:
+        return
+
+    # Discord 剛把原生預覽貼上去了（embeds 從無變有），且還沒被隱藏過 → 立刻隱藏
+    if after.embeds and not after.flags.suppress_embeds:
+        try:
+            await after.edit(suppress=True)
+        except Exception as e:
+            print(f"on_message_edit 隱藏預覽失敗: {e}")
+        finally:
+            # 不管成功與否都移除追蹤，避免這個 set 一直增長
+            pending_suppress_ids.discard(after.id)
 
 
 @client.event
@@ -203,6 +223,9 @@ async def on_message(message):
             # 6. 發送 Embed 訊息並附帶按鈕 (view)
             await message.channel.send(embed=embed, view=view)
 
+            # 登記這則訊息，交給 on_message_edit 負責後續補刀
+            pending_suppress_ids.add(message.id)
+
             # 7. 隱藏使用者發送的原始連結預覽 (需要 Bot 具備管理訊息權限)
             await message.edit(suppress=True)
 
@@ -225,6 +248,9 @@ async def on_message(message):
             # 發送隱形字元加換行，讓 Discord 讀取網址產生卡片，但畫面上方不會有明顯網址
             await message.channel.send(f"[Bilifix]({fix_url})")
 
+            # 登記這則訊息，交給 on_message_edit 負責後續補刀
+            pending_suppress_ids.add(message.id)
+
             # 隱藏使用者發送的原始訊息預覽
             try:
                 await message.edit(suppress=True)
@@ -242,6 +268,9 @@ async def on_message(message):
 
             # 由 Bot 發送修復後的連結 (Discord 會自動抓取 facebed 的完整文章預覽)
             await message.channel.send(f"[FBfix]({fix_fb_url})")
+
+            # 登記這則訊息，交給 on_message_edit 負責後續補刀
+            pending_suppress_ids.add(message.id)
 
             # 隱藏使用者發送的原始「Log in or sign up to view」無效預覽
             try:
@@ -261,8 +290,8 @@ async def on_message(message):
             # 由 Bot 發送代理網址以展示完整 Threads 卡片預覽
             await message.channel.send(f"[Threadsfix]({fix_threads_url})")
 
-            import asyncio
-            asyncio.create_task(suppress_embed_safely(message, delay=2.5))
+            # 登記這則訊息，交給 on_message_edit 負責後續補刀
+            pending_suppress_ids.add(message.id)
 
             # 隱藏使用者發送的原始訊息預覽
             try:
@@ -335,9 +364,9 @@ async def on_message(message):
                         fix_x_url = raw_x_url.replace(domain_match, chosen_proxy)
 
                         await message.channel.send(f"[Xfix]({fix_x_url})")
-                        # 使用 asyncio.create_task 在背景執行二次壓抑，不卡住 Bot 主流程
-                        import asyncio
-                        asyncio.create_task(suppress_embed_safely(message, delay=3.0))
+
+                        # 登記這則訊息，交給 on_message_edit 負責後續補刀
+                        pending_suppress_ids.add(message.id)
 
                         # 隱藏原始預覽
                         try:
@@ -384,9 +413,9 @@ async def on_message(message):
 
                             # 發送自製 Embed 並隱藏原連結預覽
                             await message.channel.send(embed=embed)
-                            # 使用 asyncio.create_task 在背景執行二次壓抑，不卡住 Bot 主流程
-                            import asyncio
-                            asyncio.create_task(suppress_embed_safely(message, delay=2.5))
+
+                            # 登記這則訊息，交給 on_message_edit 負責後續補刀
+                            pending_suppress_ids.add(message.id)
 
                             try:
                                 await message.edit(suppress=True)
@@ -537,9 +566,8 @@ async def on_message(message):
                         else:
                             await message.channel.send(embeds=embeds)
 
-                        # 使用 asyncio.create_task 在背景執行二次壓抑，不卡住 Bot 主流程
-                        import asyncio
-                        asyncio.create_task(suppress_embed_safely(message, delay=2.5))
+                        # 登記這則訊息，交給 on_message_edit 負責後續補刀
+                        pending_suppress_ids.add(message.id)
 
                         # 隱藏使用者發送的原始預覽
                         try:
@@ -623,8 +651,9 @@ async def on_message(message):
                     embed.set_image(url=img_urls[0])  # GNN只取第一張圖
 
                 await message.channel.send(embed=embed)
-                import asyncio
-                asyncio.create_task(suppress_embed_safely(message, delay=2.0))
+
+                # 登記這則訊息，交給 on_message_edit 負責後續補刀
+                pending_suppress_ids.add(message.id)
 
             # ================= 2. 哈啦版處理 =================
             elif "forum.gamer.com.tw" in url:
@@ -727,8 +756,9 @@ async def on_message(message):
                         await message.channel.send(content=first_yt)
 
                     await message.channel.send(embeds=embeds)
-                    import asyncio
-                    asyncio.create_task(suppress_embed_safely(message, delay=2.0))
+
+                    # 登記這則訊息，交給 on_message_edit 負責後續補刀
+                    pending_suppress_ids.add(message.id)
 
             # ================= 3. 小屋創作處理 =================
             elif "home.gamer.com.tw" in url:
@@ -849,8 +879,8 @@ async def on_message(message):
 
                 await message.channel.send(embeds=embeds)
 
-                import asyncio
-                asyncio.create_task(suppress_embed_safely(message, delay=2.5))
+                # 登記這則訊息，交給 on_message_edit 負責後續補刀
+                pending_suppress_ids.add(message.id)
 
         except Exception as e:
             print(f"解析巴哈姆特網址時發生錯誤: {e}")
