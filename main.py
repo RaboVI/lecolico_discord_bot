@@ -901,5 +901,6 @@ async def on_message(message):
             print(f"解析巴哈姆特網址時發生錯誤: {e}")
 
 # 啟動 Bot，請將引號內替換為你的 Token
+# test branch
 DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN")
 client.run(DISCORD_TOKEN)
