@@ -655,6 +655,11 @@ async def on_message(message):
                 # 登記這則訊息，交給 on_message_edit 負責後續補刀
                 pending_suppress_ids.add(message.id)
 
+                try:
+                    await message.edit(suppress=True)
+                except Exception as e:
+                    print(f"無法隱藏原始訊息預覽: {e}")
+
             # ================= 2. 哈啦版處理 =================
             elif "forum.gamer.com.tw" in url:
                 # 嘗試透過 data-gtm 定位，優先抓取 title 屬性
@@ -759,6 +764,11 @@ async def on_message(message):
 
                     # 登記這則訊息，交給 on_message_edit 負責後續補刀
                     pending_suppress_ids.add(message.id)
+
+                    try:
+                        await message.edit(suppress=True)
+                    except Exception as e:
+                        print(f"無法隱藏原始訊息預覽: {e}")
 
             # ================= 3. 小屋創作處理 =================
             elif "home.gamer.com.tw" in url:
@@ -881,6 +891,11 @@ async def on_message(message):
 
                 # 登記這則訊息，交給 on_message_edit 負責後續補刀
                 pending_suppress_ids.add(message.id)
+
+                try:
+                    await message.edit(suppress=True)
+                except Exception as e:
+                    print(f"無法隱藏原始訊息預覽: {e}")
 
         except Exception as e:
             print(f"解析巴哈姆特網址時發生錯誤: {e}")
