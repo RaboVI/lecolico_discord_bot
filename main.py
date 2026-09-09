@@ -125,43 +125,61 @@ async def process_ptt_embed(target_ptt_url: str, display_url: str, message: disc
             except Exception:
                 date_str = raw_date_str
 
-        # 2. 尋找第一張圖片 (或影片預覽)
+        # 2. 移除推文、meta 標籤、引文與簽名檔，提取純內文與主文圖片
+        content_copy = copy.copy(main_content) if 'copy' in globals() else BeautifulSoup(str(main_content),
+                                                                                         'html.parser')
+
+        # (a) 移除推文、上方 metadata 與 f2 雜訊行
+        for elem in content_copy.find_all(['div', 'span'],
+                                          class_=['article-metaline', 'article-metaline-right', 'push', 'f2']):
+            elem.decompose()
+
+        # (b) 拔除綠色引文節點 (span.f6 為 PTT 引文專用標籤)
+        for f6_elem in content_copy.find_all('span', class_='f6'):
+            f6_elem.decompose()
+
+        # (c) 針對「作者自身發言的主文區塊」提取第一張圖片
         first_image = None
-        for a_tag in main_content.find_all('a', href=True):
+        for a_tag in content_copy.find_all('a', href=True):
             href = a_tag['href']
-            # 支援常見圖片副檔名或特定圖片床
             if re.search(r'\.(jpg|jpeg|png|gif|webp)(\?.*)?$', href,
                          re.I) or 'i.meee.com.tw' in href or 'imgur.com' in href:
                 first_image = href
                 break
 
-        # 3. 移除推文、meta 標籤與簽名檔，保留純內文
-        # 先複製一份避免破壞 soup 樹
-        content_copy = copy.copy(main_content) if 'copy' in globals() else BeautifulSoup(str(main_content),
-                                                                                         'html.parser')
-
-        # 移除推文區塊、上方 metadata 與 f2 樣式行
-        for elem in content_copy.find_all(['div', 'span'],
-                                          class_=['article-metaline', 'article-metaline-right', 'push', 'f2']):
-            elem.decompose()
-
+        # (d) 獲取純文字並截斷簽名檔 (※ 發信站:、-- 等)
         raw_text = content_copy.get_text()
-
-        # 截斷簽名檔 (※ 發信站:、-- 等)
         raw_text = re.split(r'※\s*發信站:|--', raw_text)[0]
 
-        # 清理多餘空白與換行，並限制在約 200~300 字元
-        clean_lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
+        # 清理內文中的圖片網址 (包含常見圖床與副檔名)
+        raw_text = re.sub(r'https?://\S+?\.(?:jpg|jpeg|png|gif|webp)(?:\?\S*)?', '', raw_text,
+                          flags=re.IGNORECASE)
+        raw_text = re.sub(r'https?://(?:i\.)?imgur\.com/[a-zA-Z0-9]{5,7}', '', raw_text)
+
+        # 逐行清洗空行與文字
+        raw_lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
+        clean_lines = []
+        for line in raw_lines:
+            if line.startswith('※ 引述') or '之銘言：' in line:
+                continue
+            if re.match(r'^[::\uff1a]', line):
+                continue
+            clean_lines.append(line)
+
+        # 防呆機制：若回文作者沒有寫字 (純引用)，退回顯示原本行避免空白
+        if not clean_lines and raw_lines:
+            clean_lines = raw_lines
+
         description = "\n".join(clean_lines)
-        if len(description) > 280:
-            description = description[:280] + "..."
+        if len(description) > 150:
+            description = description[:150] + "..."
 
         # 4. 組裝 Embed (標題超連結指定為 display_url)
         embed = discord.Embed(
             title=title,
             url=display_url,
             description=description,
-            color=0x1E88E5
+            color=0xf3f3f3
         )
 
         if first_image:
@@ -177,6 +195,9 @@ async def process_ptt_embed(target_ptt_url: str, display_url: str, message: disc
 
         # 發送 Embed
         await message.channel.send(embed=embed)
+
+        # 登記這則訊息，交給 on_message_edit 負責後續補刀
+        pending_suppress_ids.add(message.id)
 
         # 隱藏原訊息預覽
         try:
