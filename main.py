@@ -4,6 +4,7 @@ import os
 import random
 import requests
 import asyncio
+import copy
 import urllib.parse # <--- 新增此行，用於處理中日文 Hashtag 網址轉碼
 from bs4 import BeautifulSoup
 from datetime import datetime, timezone
@@ -78,12 +79,113 @@ THREADS_PATTERN = r"(https?://(www\.)?threads\.(net|com)/[^\s]+)"
 INSTAGRAM_PATTERN = r"(https?://(www\.)?instagram\.com/[^\s]+)"
 # 匹配 x.com 或 twitter.com 的貼文網址
 X_PATTERN = r"(https?://(www\.)?(x|twitter)\.com/[^\s]+/status/\d+)"
-# PTT 網址正規表達式
-PTT_PATTERN = r"(https?://(www\.)?ptt\.cc/bbs/([a-zA-Z0-9_-]+)/[M]\.[0-9A-Za-z._-]+\.html)"
 # 巴哈姆特網址正規表達式
 BAHA_PATTERN = r"(https?://(gnn|forum|home)\.gamer\.com\.tw/[^\s]+)"
 # 4Gamers 網址正規表達式
 FOURGAMERS_PATTERN = r"(https?://(www\.)?4gamers\.com\.tw/news/detail/\d+/[^\s]+)"
+
+
+async def process_ptt_embed(target_ptt_url: str, display_url: str, message: discord.Message, source_name: str = "PTT"):
+    """
+    共用 PTT 解析函式：
+    - target_ptt_url: 向 PTT 官方發送請求的網址 (例如 https://www.ptt.cc/bbs/...html)
+    - display_url: Embed 標題要跳轉的超連結 (如果是 PTTWeb 傳入原始網址，若原生 PTT 則傳入 target_ptt_url)
+    - source_name: Footer 顯示的來源名稱 ("PTT" 或 "PTTWeb")
+    """
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        }
+        cookies = {'over18': '1'}
+
+        res = requests.get(target_ptt_url, headers=headers, cookies=cookies, timeout=10)
+        if res.status_code != 200:
+            return
+
+        soup = BeautifulSoup(res.text, 'html.parser')
+        main_content = soup.find('div', id='main-content')
+        if not main_content:
+            return
+
+        # 1. 提取作者、看板、標題、時間等元數據
+        meta_values = main_content.find_all('span', class_='article-meta-value')
+        author = meta_values[0].text.strip() if len(meta_values) > 0 else ""
+        board = meta_values[1].text.strip() if len(meta_values) > 1 else ""
+        title = meta_values[2].text.strip() if len(meta_values) > 2 else "PTT 文章"
+        raw_date_str = meta_values[3].text.strip() if len(meta_values) > 3 else ""
+
+        # 時間格式化：將 "Wed Sep  9 13:09:36 2026" 轉換為 "2026/09/09 13:09"
+        date_str = raw_date_str
+        if raw_date_str:
+            try:
+                from datetime import datetime
+                # PTT 的日期格式為 "%a %b %d %H:%M:%S %Y"（中間可能有多餘空格，strptime 會自動處理）
+                dt = datetime.strptime(re.sub(r'\s+', ' ', raw_date_str), '%a %b %d %H:%M:%S %Y')
+                date_str = dt.strftime('%Y/%m/%d %H:%M')
+            except Exception:
+                date_str = raw_date_str
+
+        # 2. 尋找第一張圖片 (或影片預覽)
+        first_image = None
+        for a_tag in main_content.find_all('a', href=True):
+            href = a_tag['href']
+            # 支援常見圖片副檔名或特定圖片床
+            if re.search(r'\.(jpg|jpeg|png|gif|webp)(\?.*)?$', href,
+                         re.I) or 'i.meee.com.tw' in href or 'imgur.com' in href:
+                first_image = href
+                break
+
+        # 3. 移除推文、meta 標籤與簽名檔，保留純內文
+        # 先複製一份避免破壞 soup 樹
+        content_copy = copy.copy(main_content) if 'copy' in globals() else BeautifulSoup(str(main_content),
+                                                                                         'html.parser')
+
+        # 移除推文區塊、上方 metadata 與 f2 樣式行
+        for elem in content_copy.find_all(['div', 'span'],
+                                          class_=['article-metaline', 'article-metaline-right', 'push', 'f2']):
+            elem.decompose()
+
+        raw_text = content_copy.get_text()
+
+        # 截斷簽名檔 (※ 發信站:、-- 等)
+        raw_text = re.split(r'※\s*發信站:|--', raw_text)[0]
+
+        # 清理多餘空白與換行，並限制在約 200~300 字元
+        clean_lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
+        description = "\n".join(clean_lines)
+        if len(description) > 280:
+            description = description[:280] + "..."
+
+        # 4. 組裝 Embed (標題超連結指定為 display_url)
+        embed = discord.Embed(
+            title=title,
+            url=display_url,
+            description=description,
+            color=0x1E88E5
+        )
+
+        if first_image:
+            embed.set_image(url=first_image)
+
+        # 組裝 Footer
+        footer_parts = [source_name]
+        if board:
+            footer_parts.append(f"{board}")
+        if date_str:
+            footer_parts.append(date_str)
+        embed.set_footer(text=" • ".join(footer_parts))
+
+        # 發送 Embed
+        await message.channel.send(embed=embed)
+
+        # 隱藏原訊息預覽
+        try:
+            await message.edit(suppress=True)
+        except Exception as e:
+            print(f"無法隱藏原始訊息預覽: {e}")
+
+    except Exception as e:
+        print(f"處理 PTT/PTTWeb 解析時發生錯誤: {e}")
 
 
 @client.event
@@ -413,8 +515,8 @@ async def on_message(message):
                             if media_extended:
                                 embed.set_image(url=media_extended[0].get("url"))
 
-                            # 3. 組合 Footer 文字 (愛心數 + 觀看數，支援千分位格式化)
-                            footer_parts = [f"❤️ {likes:,}"]
+                            # 3. 組合 Footer 文字 (最前面加上 X 標示，支援千分位格式化)
+                            footer_parts = ["X", f"❤️ {likes:,}"]
                             if views is not None:
                                 footer_parts.append(f"📷 {views:,}")  # 例如: 📷 12,345
 
@@ -442,153 +544,60 @@ async def on_message(message):
                 print(f"處理 X 網址時發生錯誤: {e}")
 
     # ================= 處理 PTT 網址 =================
-    if re.search(PTT_PATTERN, message.content):
-        ptt_match = re.search(PTT_PATTERN, message.content)
-        if ptt_match:
-            raw_ptt_url = ptt_match.group(0)
-            board_name = ptt_match.group(3)  # 提取看板名稱
+    ptt_pattern = r'https?://(?:www\.)?ptt\.cc/bbs/[^/]+/[A-Za-z0-9\._]+\.html'
+    ptt_match = re.search(ptt_pattern, message.content)
+    # 原生 PTT 網址命中時
+    if ptt_match:
+        raw_ptt_url = ptt_match.group(0)
+        await process_ptt_embed(
+            target_ptt_url=raw_ptt_url,
+            display_url=raw_ptt_url,
+            message=message,
+            source_name="PTT"
+        )
 
+    # ================= PTTWeb 網址處理 =================
+    pttweb_pattern = r'https?://(?:www\.)?pttweb\.cc/(?:bbs/([^/]+)/([A-Za-z0-9\._]+)|s/([^/]+)/([A-Za-z0-9]+))'
+    pttweb_match = re.search(pttweb_pattern, message.content)
+
+    if pttweb_match:
+        raw_pttweb_url = pttweb_match.group(0)
+        target_ptt_url = None
+
+        # 情況 A：標準網址 /bbs/{看板}/{文章ID}
+        if pttweb_match.group(1) and pttweb_match.group(2):
+            board = pttweb_match.group(1)
+            article_id = pttweb_match.group(2)
+            # 若末端已有 .html 則不重複補
+            if not article_id.endswith('.html'):
+                article_id += '.html'
+            target_ptt_url = f"https://www.ptt.cc/bbs/{board}/{article_id}"
+
+        # 情況 B：短網址 /s/{看板}/{短代碼}
+        elif pttweb_match.group(3) and pttweb_match.group(4):
             try:
-                # 必須帶入 over18=1 才能繞過八卦版等 18 禁驗證頁面
-                headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-                cookies = {'over18': '1'}
-
-                response = requests.get(raw_ptt_url, headers=headers, cookies=cookies)
-
-                if response.status_code == 200:
-                    soup = BeautifulSoup(response.text, 'html.parser')
-                    main_content = soup.find('div', id='main-content')
-
-                    if main_content:
-                        # 1. 提取標題與時間 (從 article-metaline 提取)
-                        meta_lines = main_content.find_all('div', class_='article-metaline')
-                        title = "無標題"
-                        post_time = ""
-                        for meta in meta_lines:
-                            tag = meta.find('span', class_='article-meta-tag').text
-                            value = meta.find('span', class_='article-meta-value').text
-                            if tag == '標題':
-                                title = value
-                            elif tag == '時間':
-                                raw_time = value.strip()
-                                try:
-                                    # PTT 時間格式通常為: Fri Sep  4 13:33:05 2026
-                                    # 日期個位數時可能會有連續兩個空格，strptime 的 %a %b %d 會自動容錯處理多個空格
-                                    dt = datetime.strptime(raw_time, "%a %b %d %H:%M:%S %Y")
-                                    post_time = dt.strftime("%Y/%m/%d %H:%M")
-                                except Exception as e:
-                                    # 若時間格式解析異常，退回原始文字
-                                    post_time = raw_time
-
-                        # 2. 備份原始 HTML 字串來尋找多媒體網址
-                        raw_html = str(main_content)
-
-                        # 尋找第一張圖片 (支援 jpg, jpeg, png, gif, webp)
-                        image_urls = re.findall(r'https?://[^\s"\'<>]+?\.(?:jpg|jpeg|png|gif|webp)', raw_html,
-                                                re.IGNORECASE)
-                        first_image = image_urls[0] if image_urls else None
-
-                        # 如果沒找到標準附檔名的圖片，嘗試尋找純 imgur 連結並補上 .jpg
-                        if not first_image:
-                            imgur_links = re.findall(r'https?://(?:i\.)?imgur\.com/([a-zA-Z0-9]{5,7})(?!\.\w+)',
-                                                     raw_html)
-                            if imgur_links:
-                                first_image = f"https://i.imgur.com/{imgur_links[0]}.jpg"
-
-                        # 尋找第一個 YouTube 影片網址
-                        yt_urls = re.findall(r'https?://(?:www\.)?(?:youtube\.com/watch\?v=|youtu\.be/)[a-zA-Z0-9_-]+',
-                                             raw_html)
-                        first_yt = yt_urls[0] if yt_urls else None
-
-                        # 3. 淨化內文：移除 Meta 標頭、推文區塊、發信站浮水印等雜訊
-                        for tag in main_content.find_all(['div', 'span']):
-                            class_name = tag.get('class', [])
-                            if any(c in class_name for c in
-                                   ['article-metaline', 'article-metaline-right', 'push', 'f2']):
-                                tag.extract()
-
-                        # 獲取純文字並切除簽名檔 (PTT 簽名檔通常以 -- 開頭)
-                        clean_text = main_content.text.split('--\n')[0]
-
-                        # --- 關鍵優化 1：移除所有圖片與 YouTube 連結 ---
-                        clean_text = re.sub(r'https?://\S+?\.(?:jpg|jpeg|png|gif|webp)', '', clean_text,
-                                            flags=re.IGNORECASE)
-                        clean_text = re.sub(r'https?://(?:www\.)?(?:youtube\.com/watch\?v=|youtu\.be/)\S+', '',
-                                            clean_text)
-                        clean_text = re.sub(r'https?://(?:i\.)?imgur\.com/[a-zA-Z0-9]{5,7}', '', clean_text)
-
-                        # 逐行去除前後空白（PTT 常有隱藏的空格行），並過濾掉純空行
-                        lines = [line.strip() for line in clean_text.splitlines()]
-
-                        # 方案 A（最緊湊，推薦）：完全不保留多餘空行，網址與文字緊密排列
-                        clean_text = "\n".join(line for line in lines if line)
-
-                        # 擷取前 250 字做為預覽，避免文章過長洗版
-                        if len(clean_text) > 250:
-                            clean_text = clean_text[:250] + "...\n\n(點擊標題閱讀全文)"
-
-                        # --- 關鍵優化 2：提取前 3 張不重複的圖片 ---
-                        # 收集標準副檔名圖片與純 imgur 圖片
-                        all_img_urls = re.findall(r'https?://[^\s"\'<>]+?\.(?:jpg|jpeg|png|gif|webp)', raw_html,
-                                                  re.IGNORECASE)
-                        imgur_links = re.findall(r'https?://(?:i\.)?imgur\.com/([a-zA-Z0-9]{5,7})(?!\.\w+)', raw_html)
-                        for img_id in imgur_links:
-                            all_img_urls.append(f"https://i.imgur.com/{img_id}.jpg")
-
-                        # 保持順序去重
-                        seen_images = set()
-                        unique_images = []
-                        for img in all_img_urls:
-                            if img not in seen_images:
-                                seen_images.add(img)
-                                unique_images.append(img)
-
-                        # 只取前 3 張
-                        preview_images = unique_images[:3]
-
-                        # --- 關鍵優化 3：組裝多圖 Embed 清單 ---
-                        embeds = []
-
-                        # 主 Embed (包含標題、內文摘要、Footer)
-                        main_embed = discord.Embed(
-                            title=title,
-                            url=raw_ptt_url,
-                            description=clean_text if clean_text else "無文字內容",
-                            color=0x2C2F33
-                        )
-                        main_embed.set_footer(text=f"Ptt 批踢踢實業坊  •  {board_name}  •  {post_time}")
-
-                        if preview_images:
-                            main_embed.set_image(url=preview_images[0])
-                        embeds.append(main_embed)
-
-                        # 第 2、3 張圖片建立為附屬 Embed (必須使用完全相同的 url)
-                        for img_url in preview_images[1:]:
-                            sub_embed = discord.Embed(url=raw_ptt_url)
-                            sub_embed.set_image(url=img_url)
-                            embeds.append(sub_embed)
-
-                        # 5. 發送處理 (有 YT 先發純網址，接著一次送出所有 embeds)
-                        if first_yt:
-                            await message.channel.send(content=first_yt)
-                            await message.channel.send(embeds=embeds)
-                        else:
-                            await message.channel.send(embeds=embeds)
-
-                        # 登記這則訊息，交給 on_message_edit 負責後續補刀
-                        pending_suppress_ids.add(message.id)
-
-                        # 隱藏使用者發送的原始預覽
-                        try:
-                            await message.edit(suppress=True)
-                        except Exception as e:
-                            print(f"無法隱藏原始訊息預覽: {e}")
-
-                else:
-                    print(f"PTT 請求失敗，狀態碼: {response.status_code}")
-
+                # 向短網址發送請求，從其頁面內撈出真正的 ptt.cc 文章網址
+                s_headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                }
+                s_res = requests.get(raw_pttweb_url, headers=s_headers, timeout=5)
+                if s_res.status_code == 200:
+                    # 搜尋頁面中的 ptt.cc 文章連結
+                    real_ptt_match = re.search(r'https?://www\.ptt\.cc/bbs/[^/]+/[A-Za-z0-9\._]+\.html',
+                                               s_res.text)
+                    if real_ptt_match:
+                        target_ptt_url = real_ptt_match.group(0)
             except Exception as e:
-                print(f"處理 PTT 網址時發生錯誤: {e}")
+                print(f"解析 PTTWeb 短網址時發生錯誤: {e}")
+
+        # 若成功得到官方 target_ptt_url，交給共用函式解析；display_url 帶入使用者的原始 pttweb 連結
+        if target_ptt_url:
+            await process_ptt_embed(
+                target_ptt_url=target_ptt_url,
+                display_url=raw_pttweb_url,
+                message=message,
+                source_name="PTTWeb"
+            )
 
     # ================= 處理巴哈姆特網址 (GNN / 哈啦版 / 小屋) =================
     if re.search(BAHA_PATTERN, message.content):
