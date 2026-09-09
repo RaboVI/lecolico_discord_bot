@@ -7,6 +7,11 @@ import asyncio
 import urllib.parse # <--- 新增此行，用於處理中日文 Hashtag 網址轉碼
 from bs4 import BeautifulSoup
 from datetime import datetime, timezone
+from dotenv import load_dotenv
+
+# 自動讀取本地 .env 檔案中的環境變數
+# 若在 Railway 線上運行，Railway 會直接提供環境變數，此函式會自動略過而不報錯
+load_dotenv()
 
 # 設定 Intents 以便讀取訊息內容
 intents = discord.Intents.default()
@@ -75,6 +80,10 @@ INSTAGRAM_PATTERN = r"(https?://(www\.)?instagram\.com/[^\s]+)"
 X_PATTERN = r"(https?://(www\.)?(x|twitter)\.com/[^\s]+/status/\d+)"
 # PTT 網址正規表達式
 PTT_PATTERN = r"(https?://(www\.)?ptt\.cc/bbs/([a-zA-Z0-9_-]+)/[M]\.[0-9A-Za-z._-]+\.html)"
+# 巴哈姆特網址正規表達式
+BAHA_PATTERN = r"(https?://(gnn|forum|home)\.gamer\.com\.tw/[^\s]+)"
+# 4Gamers 網址正規表達式
+FOURGAMERS_PATTERN = r"(https?://(www\.)?4gamers\.com\.tw/news/detail/\d+/[^\s]+)"
 
 
 @client.event
@@ -582,8 +591,6 @@ async def on_message(message):
                 print(f"處理 PTT 網址時發生錯誤: {e}")
 
     # ================= 處理巴哈姆特網址 (GNN / 哈啦版 / 小屋) =================
-    BAHA_PATTERN = r"(https?://(gnn|forum|home)\.gamer\.com\.tw/[^\s]+)"
-
     if re.search(BAHA_PATTERN, message.content):
         match = re.search(BAHA_PATTERN, message.content)
         url = match.group(0)
@@ -900,7 +907,132 @@ async def on_message(message):
         except Exception as e:
             print(f"解析巴哈姆特網址時發生錯誤: {e}")
 
+    # ================= 處理 4Gamers 網址 =================
+    if re.search(FOURGAMERS_PATTERN, message.content):
+        fg_match = re.search(FOURGAMERS_PATTERN, message.content)
+        if fg_match:
+            raw_fg_url = fg_match.group(0)
+
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            }
+
+            try:
+                res = requests.get(raw_fg_url, headers=headers)
+                res.encoding = 'utf-8'
+                soup = BeautifulSoup(res.text, 'html.parser')
+
+                # 1. 解析標題
+                title_tag = soup.find('h1')
+                title = title_tag.text.strip() if title_tag else "4Gamers 新聞"
+
+                # 2. 解析標籤 (鎖定原始 HTML 中的分類超連結，不添加 # 符號)
+                tag_text = ""
+
+                # 尋找 href 屬性包含 /news/category/ 的 <a> 標籤
+                category_a_tag = soup.find('a', href=re.compile(r'/news/category/'))
+
+                if category_a_tag and category_a_tag.text.strip():
+                    # 直接取得純文字，並利用 lstrip('#') 防呆移除開頭可能自帶的井號
+                    tag_text = category_a_tag.text.strip().lstrip('#')
+
+                # 備用方案：若超連結失效，嘗試從 JSON-LD 結構化資料中提取
+                if not tag_text:
+                    for script in soup.find_all('script', type='application/ld+json'):
+                        if script.string and "NewsArticle" in script.string:
+                            try:
+                                import json
+                                data = json.loads(script.string)
+                                if isinstance(data, dict) and data.get("articleSection"):
+                                    tag_text = data.get("articleSection").lstrip('#')
+                                    break
+                            except Exception:
+                                pass
+
+                # 3. 解析發文時間
+                date_str = ""
+                time_tag = soup.find('time')
+                if time_tag:
+                    raw_dt = time_tag.get('datetime', '')
+                    if raw_dt:
+                        try:
+                            clean_iso = re.sub(r'\.\d+Z$', 'Z', raw_dt)
+                            dt = datetime.fromisoformat(clean_iso.replace('Z', '+00:00'))
+                            date_str = dt.strftime("%Y/%m/%d %H:%M")
+                        except Exception:
+                            date_str = time_tag.text.strip()
+                    else:
+                        date_str = time_tag.text.strip()
+
+                # 4. 解析內文 (清除空標籤與壓縮行距)
+                clean_text = ""
+                content_div = soup.find('div', attrs={'data-news-content': True})
+                if not content_div:
+                    content_div = soup.find('article')
+
+                if content_div:
+                    # 複製一份獨立解析，避免破壞原始結構
+                    c_soup = BeautifulSoup(str(content_div), 'html.parser')
+
+                    # 移除所有無實質文字的空段落或純空白 (&nbsp;)
+                    for p in c_soup.find_all('p'):
+                        if not p.text.replace('\xa0', '').strip():
+                            p.decompose()
+
+                    # 逐行清洗空行
+                    raw_lines = c_soup.get_text(separator='\n').splitlines()
+                    clean_lines = [line.strip() for line in raw_lines if line.strip()]
+                    clean_text = "\n".join(clean_lines)
+
+                    # 150 字安全截斷
+                    if len(clean_text) > 150:
+                        clean_text = clean_text[:150]
+                        clean_text = re.sub(r'\[[^\]]*$|\[[^\]]*\]\([^)]*$', '', clean_text).strip()
+                        clean_text = re.sub(r'[-*]+$', '', clean_text).strip()
+                        clean_text += "..."
+
+                # 5. 解析封面圖片 (只取第一張)
+                cover_img = None
+                picture_tag = soup.find('picture')
+                if picture_tag:
+                    img_tag = picture_tag.find('img')
+                    if img_tag:
+                        cover_img = img_tag.get('src') or img_tag.get('data-src')
+
+                if not cover_img:
+                    og_img = soup.find('meta', property='og:image')
+                    if og_img and og_img.get('content'):
+                        cover_img = og_img.get('content')
+
+                # 6. 組裝 Discord Embed (改為深藍色 0x0E2338)
+                embed = discord.Embed(
+                    title=title,
+                    url=raw_fg_url,
+                    description=clean_text if clean_text else "無文字內容",
+                    color=0x0E2338
+                )
+
+                if cover_img and cover_img.startswith('http'):
+                    embed.set_image(url=cover_img)
+
+                # 組裝 Footer
+                footer_parts = ["4Gamers"]
+                if tag_text:
+                    footer_parts.append(tag_text)
+                if date_str:
+                    footer_parts.append(date_str)
+                embed.set_footer(text=" • ".join(footer_parts))
+
+                await message.channel.send(embed=embed)
+
+                try:
+                    await message.edit(suppress=True)
+                except Exception as e:
+                    print(f"無法隱藏原始訊息預覽: {e}")
+
+            except Exception as e:
+                print(f"處理 4Gamers 網址時發生錯誤: {e}")
+
 # 啟動 Bot，請將引號內替換為你的 Token
-# test branch
 DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN")
 client.run(DISCORD_TOKEN)
