@@ -400,22 +400,48 @@ async def on_message(message):
             except Exception as e:
                 print(f"無法隱藏原始訊息預覽: {e}")
 
-    # ================= 新增：處理 Facebook 網址 =================
+
+    # ================= 處理 Facebook 網址 =================
     if re.search(FACEBOOK_PATTERN, message.content) and "facebed.com" not in message.content:
         fb_match = re.search(FACEBOOK_PATTERN, message.content)
         if fb_match:
             raw_fb_url = fb_match.group(0)
+            target_fb_url = raw_fb_url
 
-            # 將 facebook.com / fb.watch 替換為 facebed.com
-            fix_fb_url = re.sub(r"(facebook\.com|fb\.watch)", "facebed.com", raw_fb_url)
+            # 針對 /share/ (包含 /share/v/, /share/p/, /share/r/ 等短跳轉) 進行真實路徑還原
+            if "/share/" in raw_fb_url:
+                try:
+                    headers = {
+                        'User-Agent': 'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)'
+                    }
+                    res = requests.get(raw_fb_url, headers=headers, allow_redirects=True, timeout=8)
 
-            # 由 Bot 發送修復後的連結 (Discord 會自動抓取 facebed 的完整文章預覽)
+                    if "/share/" not in res.url:
+                        target_fb_url = res.url
+                    else:
+                        soup = BeautifulSoup(res.text, 'html.parser')
+                        og_url = soup.find('meta', property='og:url')
+                        canonical = soup.find('link', rel='canonical')
+
+                        if og_url and og_url.get('content') and "/share/" not in og_url['content']:
+                            target_fb_url = og_url['content']
+                        elif canonical and canonical.get('href') and "/share/" not in canonical['href']:
+                            target_fb_url = canonical['href']
+                        else:
+                            reel_matches = re.findall(r'https?://[^\s"\'<>]*?/reel/\d+', res.text)
+                            if reel_matches:
+                                target_fb_url = reel_matches[0]
+
+                    target_fb_url = target_fb_url.split('?')[0]
+                except Exception as e:
+                    print(f"解析 FB Share 短網址時發生錯誤: {e}")
+
+            # 將最終目標網域替換為 facebed.com
+            fix_fb_url = re.sub(r"(facebook\.com|fb\.watch)", "facebed.com", target_fb_url)
+
             await message.channel.send(f"[FBfix]({fix_fb_url})")
-
-            # 登記這則訊息，交給 on_message_edit 負責後續補刀
             pending_suppress_ids.add(message.id)
 
-            # 隱藏使用者發送的原始「Log in or sign up to view」無效預覽
             try:
                 await message.edit(suppress=True)
             except Exception as e:
