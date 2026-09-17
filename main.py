@@ -409,55 +409,65 @@ async def on_message(message):
             raw_fb_url = fb_match.group(0)
             target_fb_url = raw_fb_url
 
-            # 針對 /share/ (包含 /share/v/, /share/p/, /share/r/ 等短跳轉) 進行真實路徑還原
+            # 針對 /share/ 短跳轉進行路徑還原
             if "/share/" in raw_fb_url:
                 try:
                     headers = {
                         'User-Agent': 'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)',
                         'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7'
                     }
-                    res = requests.get(raw_fb_url, headers=headers, allow_redirects=True, timeout=8)
-                    final_url = res.url
 
-                    # 1. 檢查是否被踢到登入頁，若是則嘗試從參數提取真實目標
-                    if "/login" in final_url or "login.php" in final_url:
-                        match_next = re.search(r'[?&](?:next|u)=([^&]+)', final_url)
-                        if match_next:
-                            decoded_target = urllib.parse.unquote(match_next.group(1))
-                            if "/share/" not in decoded_target and (
-                                    "/reel/" in decoded_target or "/posts/" in decoded_target or "/videos/" in decoded_target):
-                                target_fb_url = decoded_target
+                    # 方案 1：先發送 HEAD 請求且不跟隨重定向，直接撈取 Location 標頭 (繞過機房 HTML 防火牆)
+                    head_res = requests.head(raw_fb_url, headers=headers, allow_redirects=False, timeout=5)
+                    location = head_res.headers.get('Location', '')
 
-                    # 2. 正常跳轉且未跑到登入頁的情況
-                    elif "/share/" not in final_url:
-                        target_fb_url = final_url
+                    if location:
+                        if "/login" not in location and "/share/" not in location:
+                            target_fb_url = location
+                        elif "/login" in location:
+                            match_next = re.search(r'[?&](?:next|u)=([^&]+)', location)
+                            if match_next:
+                                decoded = urllib.parse.unquote(match_next.group(1))
+                                if "/share/" not in decoded:
+                                    target_fb_url = decoded
 
-                    # 3. 若依然包含 /share/，從 Meta、Canonical 標籤解析
+                    # 若 HEAD 未能成功解析，降級嘗試 GET 請求
                     if "/share/" in target_fb_url:
-                        soup = BeautifulSoup(res.text, 'html.parser')
-                        og_url = soup.find('meta', property='og:url')
-                        canonical = soup.find('link', rel='canonical')
+                        res = requests.get(raw_fb_url, headers=headers, allow_redirects=True, timeout=8)
+                        final_url = res.url
 
-                        cand_url = ""
-                        if og_url and og_url.get('content'):
-                            cand_url = og_url['content']
-                        elif canonical and canonical.get('href'):
-                            cand_url = canonical['href']
+                        if "/login" in final_url or "login.php" in final_url:
+                            match_next = re.search(r'[?&](?:next|u)=([^&]+)', final_url)
+                            if match_next:
+                                decoded_target = urllib.parse.unquote(match_next.group(1))
+                                if "/share/" not in decoded_target and (
+                                        "/reel/" in decoded_target or "/posts/" in decoded_target or "/videos/" in decoded_target):
+                                    target_fb_url = decoded_target
+                        elif "/share/" not in final_url:
+                            target_fb_url = final_url
 
-                        if cand_url and "/share/" not in cand_url and "/login" not in cand_url:
-                            target_fb_url = cand_url
+                        if "/share/" in target_fb_url:
+                            soup = BeautifulSoup(res.text, 'html.parser')
+                            og_url = soup.find('meta', property='og:url')
+                            canonical = soup.find('link', rel='canonical')
 
-                    # 4. 深度備用方案：從 HTML 內容（包含 JavaScript/JSON）挖掘 Reel 或 Video ID
-                    if "/share/" in target_fb_url:
-                        # (a) 尋找一般或帶有轉義斜線的 reel 連結 (例如: reel/123 或 reel\/123)
-                        reel_match = re.search(r'reel[/\\]+(\d+)', res.text)
-                        if reel_match:
-                            target_fb_url = f"https://www.facebook.com/reel/{reel_match.group(1)}"
-                        else:
-                            # (b) 尋找 JSON 中的 video_id, post_id, target_id
-                            id_match = re.search(r'"(?:video_id|post_id|target_id)":"?(\d{10,})"?', res.text)
-                            if id_match:
-                                target_fb_url = f"https://www.facebook.com/reel/{id_match.group(1)}"
+                            cand_url = ""
+                            if og_url and og_url.get('content'):
+                                cand_url = og_url['content']
+                            elif canonical and canonical.get('href'):
+                                cand_url = canonical['href']
+
+                            if cand_url and "/share/" not in cand_url and "/login" not in cand_url:
+                                target_fb_url = cand_url
+
+                        if "/share/" in target_fb_url:
+                            reel_match = re.search(r'reel[/\\]+(\d+)', res.text)
+                            if reel_match:
+                                target_fb_url = f"https://www.facebook.com/reel/{reel_match.group(1)}"
+                            else:
+                                id_match = re.search(r'"(?:video_id|post_id|target_id)":"?(\d{10,})"?', res.text)
+                                if id_match:
+                                    target_fb_url = f"https://www.facebook.com/reel/{id_match.group(1)}"
 
                     # 清理追蹤參數 (例如 ?mibextid=... 或 ?rdid=...)
                     target_fb_url = target_fb_url.split('?')[0]
@@ -465,7 +475,7 @@ async def on_message(message):
                 except Exception as e:
                     print(f"解析 FB Share 短網址時發生錯誤: {e}")
 
-            # 5. 終極防呆：若最終仍是登入頁，安全退回原始網址
+            # 終極防呆：若最後仍是登入頁，安全退回原始網址
             if "/login" in target_fb_url or "login.php" in target_fb_url:
                 target_fb_url = raw_fb_url
 
