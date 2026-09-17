@@ -421,25 +421,19 @@ async def on_message(message):
 
                     # 1. 檢查是否被踢到登入頁，若是則嘗試從參數提取真實目標
                     if "/login" in final_url or "login.php" in final_url:
-                        # 檢查 next= 或 u= 參數
                         match_next = re.search(r'[?&](?:next|u)=([^&]+)', final_url)
                         if match_next:
                             decoded_target = urllib.parse.unquote(match_next.group(1))
                             if "/share/" not in decoded_target and (
                                     "/reel/" in decoded_target or "/posts/" in decoded_target or "/videos/" in decoded_target):
                                 target_fb_url = decoded_target
-                        else:
-                            # 嘗試從登入頁 HTML 中尋找殘留的 reel 或 post 網址
-                            reel_in_html = re.findall(r'https?://[^\s"\'<>]*?/reel/\d+', res.text)
-                            if reel_in_html:
-                                target_fb_url = reel_in_html[0]
 
                     # 2. 正常跳轉且未跑到登入頁的情況
                     elif "/share/" not in final_url:
                         target_fb_url = final_url
 
-                    # 3. 若仍停留在 /share/，從 HTML 的 og:url 或 canonical 標籤解析
-                    else:
+                    # 3. 若依然包含 /share/，從 Meta、Canonical 標籤解析
+                    if "/share/" in target_fb_url:
                         soup = BeautifulSoup(res.text, 'html.parser')
                         og_url = soup.find('meta', property='og:url')
                         canonical = soup.find('link', rel='canonical')
@@ -452,10 +446,18 @@ async def on_message(message):
 
                         if cand_url and "/share/" not in cand_url and "/login" not in cand_url:
                             target_fb_url = cand_url
+
+                    # 4. 深度備用方案：從 HTML 內容（包含 JavaScript/JSON）挖掘 Reel 或 Video ID
+                    if "/share/" in target_fb_url:
+                        # (a) 尋找一般或帶有轉義斜線的 reel 連結 (例如: reel/123 或 reel\/123)
+                        reel_match = re.search(r'reel[/\\]+(\d+)', res.text)
+                        if reel_match:
+                            target_fb_url = f"https://www.facebook.com/reel/{reel_match.group(1)}"
                         else:
-                            reel_in_html = re.findall(r'https?://[^\s"\'<>]*?/reel/\d+', res.text)
-                            if reel_in_html:
-                                target_fb_url = reel_in_html[0]
+                            # (b) 尋找 JSON 中的 video_id, post_id, target_id
+                            id_match = re.search(r'"(?:video_id|post_id|target_id)":"?(\d{10,})"?', res.text)
+                            if id_match:
+                                target_fb_url = f"https://www.facebook.com/reel/{id_match.group(1)}"
 
                     # 清理追蹤參數 (例如 ?mibextid=... 或 ?rdid=...)
                     target_fb_url = target_fb_url.split('?')[0]
@@ -463,7 +465,7 @@ async def on_message(message):
                 except Exception as e:
                     print(f"解析 FB Share 短網址時發生錯誤: {e}")
 
-            # 4. 終極防呆：如果最終還是拿到了 login 頁面，安全退回原始網址
+            # 5. 終極防呆：若最終仍是登入頁，安全退回原始網址
             if "/login" in target_fb_url or "login.php" in target_fb_url:
                 target_fb_url = raw_fb_url
 
