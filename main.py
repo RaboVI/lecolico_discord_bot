@@ -5,6 +5,7 @@ import random
 import requests
 import asyncio
 import copy
+import urllib
 import urllib.parse # <--- 新增此行，用於處理中日文 Hashtag 網址轉碼
 from bs4 import BeautifulSoup
 from datetime import datetime, timezone
@@ -913,8 +914,6 @@ async def on_message(message):
                         except Exception:
                             date_str = date_match.group(0)
                         break
-
-                import urllib.parse
 
                 # 轉換 Markdown 超連結
                 for a in article_content.find_all('a'):
