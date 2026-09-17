@@ -412,36 +412,70 @@ async def on_message(message):
             if "/share/" in raw_fb_url:
                 try:
                     headers = {
-                        'User-Agent': 'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)'
+                        'User-Agent': 'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)',
+                        'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7'
                     }
                     res = requests.get(raw_fb_url, headers=headers, allow_redirects=True, timeout=8)
+                    final_url = res.url
 
-                    if "/share/" not in res.url:
-                        target_fb_url = res.url
+                    # 1. 檢查是否被踢到登入頁，若是則嘗試從參數提取真實目標
+                    if "/login" in final_url or "login.php" in final_url:
+                        # 檢查 next= 或 u= 參數
+                        match_next = re.search(r'[?&](?:next|u)=([^&]+)', final_url)
+                        if match_next:
+                            decoded_target = urllib.parse.unquote(match_next.group(1))
+                            if "/share/" not in decoded_target and (
+                                    "/reel/" in decoded_target or "/posts/" in decoded_target or "/videos/" in decoded_target):
+                                target_fb_url = decoded_target
+                        else:
+                            # 嘗試從登入頁 HTML 中尋找殘留的 reel 或 post 網址
+                            reel_in_html = re.findall(r'https?://[^\s"\'<>]*?/reel/\d+', res.text)
+                            if reel_in_html:
+                                target_fb_url = reel_in_html[0]
+
+                    # 2. 正常跳轉且未跑到登入頁的情況
+                    elif "/share/" not in final_url:
+                        target_fb_url = final_url
+
+                    # 3. 若仍停留在 /share/，從 HTML 的 og:url 或 canonical 標籤解析
                     else:
                         soup = BeautifulSoup(res.text, 'html.parser')
                         og_url = soup.find('meta', property='og:url')
                         canonical = soup.find('link', rel='canonical')
 
-                        if og_url and og_url.get('content') and "/share/" not in og_url['content']:
-                            target_fb_url = og_url['content']
-                        elif canonical and canonical.get('href') and "/share/" not in canonical['href']:
-                            target_fb_url = canonical['href']
-                        else:
-                            reel_matches = re.findall(r'https?://[^\s"\'<>]*?/reel/\d+', res.text)
-                            if reel_matches:
-                                target_fb_url = reel_matches[0]
+                        cand_url = ""
+                        if og_url and og_url.get('content'):
+                            cand_url = og_url['content']
+                        elif canonical and canonical.get('href'):
+                            cand_url = canonical['href']
 
+                        if cand_url and "/share/" not in cand_url and "/login" not in cand_url:
+                            target_fb_url = cand_url
+                        else:
+                            reel_in_html = re.findall(r'https?://[^\s"\'<>]*?/reel/\d+', res.text)
+                            if reel_in_html:
+                                target_fb_url = reel_in_html[0]
+
+                    # 清理追蹤參數 (例如 ?mibextid=... 或 ?rdid=...)
                     target_fb_url = target_fb_url.split('?')[0]
+
                 except Exception as e:
                     print(f"解析 FB Share 短網址時發生錯誤: {e}")
 
-            # 將最終目標網域替換為 facebed.com
+            # 4. 終極防呆：如果最終還是拿到了 login 頁面，安全退回原始網址
+            if "/login" in target_fb_url or "login.php" in target_fb_url:
+                target_fb_url = raw_fb_url
+
+            # 將最終目標網域替換為 facebed.com 代理
             fix_fb_url = re.sub(r"(facebook\.com|fb\.watch)", "facebed.com", target_fb_url)
 
+            # 發送修復後的超連結
             await message.channel.send(f"[FBfix]({fix_fb_url})")
+
+            # 登記這則訊息，交給 on_message_edit 負責後續補刀
             pending_suppress_ids.add(message.id)
 
+            # 隱藏原始預覽
             try:
                 await message.edit(suppress=True)
             except Exception as e:
