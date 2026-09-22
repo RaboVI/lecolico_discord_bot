@@ -228,20 +228,20 @@ async def on_ready():
 
 @client.event
 async def on_message_edit(before, after):
-    # 只處理清單裡有記錄的訊息，其餘一律不干涉（例如使用者自己編輯了文字）
-    if after.id not in pending_suppress_ids:
+    # 忽略 Bot 自己的編輯事件
+    if after.author.bot:
         return
 
-    # Discord 剛把原生預覽貼上去了（embeds 從無變有），且還沒被隱藏過 → 立刻隱藏
-    if after.embeds and not after.flags.suppress_embeds:
-        try:
-            await after.edit(suppress=True)
-        except Exception as e:
-            print(f"on_message_edit 隱藏預覽失敗: {e}")
-        finally:
-            # 不管成功與否都移除追蹤，避免這個 set 一直增長
-            pending_suppress_ids.discard(after.id)
-
+    # 1. 處理待補刀名單中的訊息 (原有的 FB / 其他平台隱藏預覽邏輯)
+    if after.id in pending_suppress_ids:
+        if after.embeds and not after.flags.suppress_embeds:
+            try:
+                await after.edit(suppress=True)
+            except Exception as e:
+                print(f"on_message_edit 隱藏預覽失敗: {e}")
+            finally:
+                pending_suppress_ids.discard(after.id)
+        return
 
 @client.event
 async def on_message(message):
@@ -527,29 +527,26 @@ async def on_message(message):
 
             try:
                 # 請求 API 獲取推文資料
-                response = requests.get(api_url)
+                response = requests.get(api_url, timeout=6)
 
                 if response.status_code == 200:
                     tweet_data = response.json()
 
                     has_media = tweet_data.get("hasMedia", False)
-                    is_sensitive = tweet_data.get("possibly_sensitive", False)
                     media_extended = tweet_data.get("media_extended", [])
 
                     # 判斷是否有影片或 GIF
                     has_video_or_gif = any(m.get("type") in ["video", "gif"] for m in media_extended)
 
-                    # 邏輯 7: 沒有媒體 (純文字推文)
+                    # 邏輯 7: 沒有媒體 (純文字推文) -> 保留原生預覽
                     if not has_media:
                         print("此為純文字推文，保留原生預覽 (不做事)。")
 
                     # 邏輯 9: 有影片，則隨機呼叫代理服務
                     elif has_video_or_gif:
-                        # 建立代理伺服器清單
                         x_proxies = ["fixvx.com", "fixupx.com"]
                         chosen_proxy = random.choice(x_proxies)
 
-                        # 替換原網址中的網域
                         domain_match = re.search(r"(x|twitter)\.com", raw_x_url).group(0)
                         fix_x_url = raw_x_url.replace(domain_match, chosen_proxy)
 
@@ -558,63 +555,71 @@ async def on_message(message):
                         # 登記這則訊息，交給 on_message_edit 負責後續補刀
                         pending_suppress_ids.add(message.id)
 
-                        # 隱藏原始預覽
                         try:
                             await message.edit(suppress=True)
                         except Exception as e:
                             print(f"無法隱藏原始訊息預覽: {e}")
 
-                    # 邏輯 5 & 8: 有媒體且非影片 (即純圖片推文)
+                    # 邏輯 5 & 8: 有媒體且非影片 (所有圖片推文統一自組 Embed，徹底消滅 18+ 成人限制擋板並支援多圖)
                     else:
-                        if is_sensitive:
-                            # 邏輯 5: 是圖片且為敏感內容 -> 自製 Embed
-                            # 從 JSON 中提取所需資料 (內文通常已包含 Hashtag)
-                            raw_text = tweet_data.get("text", "")
-                            likes = tweet_data.get("likes", 0)
-                            views = tweet_data.get("views")  # <--- 正確名稱為複數 views
-                            author_name = tweet_data.get("user_name", "")
-                            author_screen_name = tweet_data.get("user_screen_name", "")
-                            date_epoch = tweet_data.get("date_epoch", 0)
+                        raw_text = tweet_data.get("text", "")
+                        likes = tweet_data.get("likes", 0)
+                        views = tweet_data.get("views")
+                        author_name = tweet_data.get("user_name", "")
+                        author_screen_name = tweet_data.get("user_screen_name", "")
+                        author_avatar = tweet_data.get("user_profile_image_url", "")
+                        date_epoch = tweet_data.get("date_epoch", 0)
 
-                            # 1. 將內文中的 Hashtag 轉為超連結
-                            formatted_text = linkify_hashtags(raw_text)
+                        # 1. 將內文中的 Hashtag 轉為超連結
+                        formatted_text = linkify_hashtags(raw_text)
 
-                            # 2. 建立卡片框架
-                            embed = discord.Embed(
-                                description=formatted_text,
-                                url=raw_x_url,
-                                color=0x1DA1F2,  # Twitter 藍色
-                                timestamp=datetime.fromtimestamp(date_epoch, timezone.utc)
-                            )
+                        # 2. 建立主卡片框架
+                        primary_embed = discord.Embed(
+                            description=formatted_text if formatted_text else None,
+                            url=raw_x_url,
+                            color=0x1DA1F2,  # Twitter 藍色
+                            timestamp=datetime.fromtimestamp(date_epoch, timezone.utc)
+                        )
 
-                            # 設定作者
-                            embed.set_author(name=f"{author_name} (@{author_screen_name})", url=raw_x_url)
+                        # 設定作者與頭像
+                        primary_embed.set_author(
+                            name=f"{author_name} (@{author_screen_name})",
+                            url=raw_x_url,
+                            icon_url=author_avatar if author_avatar else None
+                        )
 
-                            # 設定圖片 (抓取 media_extended 中的第一張圖片)
-                            if media_extended:
-                                embed.set_image(url=media_extended[0].get("url"))
+                        # 篩選所有圖片 URL
+                        image_urls = [m.get("url") for m in media_extended if m.get("url")]
 
-                            # 3. 組合 Footer 文字 (最前面加上 X 標示，支援千分位格式化)
-                            footer_parts = ["X", f"❤️ {likes:,}"]
-                            if views is not None:
-                                footer_parts.append(f"📷 {views:,}")  # 例如: 📷 12,345
+                        # 設定第一張圖片
+                        if image_urls:
+                            primary_embed.set_image(url=image_urls[0])
 
-                            embed.set_footer(text="  •  ".join(footer_parts))
+                        # 3. 組合 Footer 文字 (支援千分位格式化)
+                        footer_parts = ["X", f"❤️ {likes:,}"]
+                        if views is not None:
+                            footer_parts.append(f"📷 {views:,}")
 
-                            # 發送自製 Embed 並隱藏原連結預覽
-                            await message.channel.send(embed=embed)
+                        primary_embed.set_footer(text="  •  ".join(footer_parts))
 
-                            # 登記這則訊息，交給 on_message_edit 負責後續補刀
-                            pending_suppress_ids.add(message.id)
+                        embeds_to_send = [primary_embed]
 
-                            try:
-                                await message.edit(suppress=True)
-                            except Exception as e:
-                                print(f"無法隱藏原始訊息預覽: {e}")
+                        # 支援第 2 至 4 張圖片的原生拼貼效果 (同 url 即會自動並排)
+                        for extra_url in image_urls[1:4]:
+                            extra_embed = discord.Embed(url=raw_x_url)
+                            extra_embed.set_image(url=extra_url)
+                            embeds_to_send.append(extra_embed)
 
-                        else:
-                            # 邏輯 8: 是圖片但非敏感內容
-                            print("此為一般圖片推文，保留原生預覽 (不做事)。")
+                        # 發送自製 Embed 並隱藏原連結預覽
+                        await message.channel.send(embeds=embeds_to_send)
+
+                        # 登記這則訊息，交給 on_message_edit 負責後續補刀
+                        pending_suppress_ids.add(message.id)
+
+                        try:
+                            await message.edit(suppress=True)
+                        except Exception as e:
+                            print(f"無法隱藏原始訊息預覽: {e}")
 
                 else:
                     print(f"X API 請求失敗，狀態碼: {response.status_code}")
