@@ -10,10 +10,38 @@ import urllib.parse # <--- 新增此行，用於處理中日文 Hashtag 網址�
 from bs4 import BeautifulSoup
 from datetime import datetime, timezone
 from dotenv import load_dotenv
+from cachetools import TTLCache
 
 # 自動讀取本地 .env 檔案中的環境變數
 # 若在 Railway 線上運行，Railway 會直接提供環境變數，此函式會自動略過而不報錯
 load_dotenv()
+
+# 建立小屋創作 Embed 快取：最多儲存 100 筆，每筆有效時間 2 小時 (7200 秒)
+baha_artwork_cache = TTLCache(maxsize=100, ttl=86400)
+
+class BahaSessionManager:
+    """巴哈姆特專用常駐連線管理器：自動維護 CookieJar 與 Token 輪轉"""
+
+    def __init__(self):
+        self.session = requests.Session()
+        self.session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Referer': 'https://home.gamer.com.tw/'
+        })
+        self.load_initial_cookies()
+
+    def load_initial_cookies(self):
+        init_cookie_str = os.environ.get("BAHA_HOME_COOKIE", "ckR18=1;")
+        for item in init_cookie_str.split(';'):
+            if '=' in item:
+                k, v = item.strip().split('=', 1)
+                self.session.cookies.set(k.strip(), v.strip(), domain='.gamer.com.tw')
+
+    def get(self, url, **kwargs):
+        return self.session.get(url, timeout=10, **kwargs)
+
+
+baha_client = BahaSessionManager()
 
 # 設定 Intents 以便讀取訊息內容
 intents = discord.Intents.default()
@@ -23,28 +51,6 @@ pending_suppress_ids = set()    # 追蹤「Bot 已經自己產生過 Embed」的
 # 用途：讓 on_message_edit 知道，如果 Discord 之後才把原生預覽貼到這則訊息上，
 # 要主動把它隱藏掉——不再靠固定延遲去「賭」時間點
 
-# 定義一個通用的安全隱藏預覽輔助函式：
-"""async def suppress_embed_safely(message, delay=2.0):
-    # 先嘗試隱藏預覽，若 Discord 尚未生成，則等待一段時間後進行二次檢查與壓抑
-    
-    try:
-        await message.edit(suppress=True)
-    except Exception as e:
-        print(f"首次隱藏預覽失敗: {e}")
-
-    # 等待 Discord 後端完成 Embed 渲染
-    await asyncio.sleep(delay)
-
-    try:
-        # 重新抓取訊息最新狀態
-        fresh_msg = await message.channel.fetch_message(message.id)
-        # 若仍存在原生 embeds 且尚未被壓抑，執行二次壓抑
-        if fresh_msg.embeds and not fresh_msg.flags.suppress_embeds:
-            await fresh_msg.edit(suppress=True)
-    except Exception as e:
-        # 避免訊息已被使用者手動刪除時拋出 NotFound 錯誤
-        pass
-"""
 
 # 建立 Hashtag 自動超連結轉換函式
 def linkify_hashtags(text):
@@ -876,9 +882,25 @@ async def on_message(message):
                 except Exception as e:
                     print(f"無法隱藏原始訊息預覽: {e}")
 
-            # ================= 3. 小屋創作處理 =================
+            # ================= 3. 小屋創作處理 (Session 常駐 + 快取機制) =================
             elif "home.gamer.com.tw" in url:
                 section_name = "小屋創作"
+
+                # 1. 檢查是否命中記憶體快取 (命中則秒發，完全不消耗對外網路請求)
+                if url in baha_artwork_cache:
+                    cached_embeds = baha_artwork_cache[url]
+                    await message.channel.send(embeds=cached_embeds)
+                    pending_suppress_ids.add(message.id)
+                    try:
+                        await message.edit(suppress=True)
+                    except Exception as e:
+                        print(f"無法隱藏原始訊息預覽: {e}")
+                    return
+
+                # 2. 未命中快取：透過常駐 Session 發送請求 (自動繼承與輪轉 BAHARUNE)
+                res = baha_client.get(url)
+                res.encoding = 'utf-8'
+                soup = BeautifulSoup(res.text, 'html.parser')
 
                 # 防呆機制：檢查是否被擋在權限牆外 (找不到內文區塊)
                 article_content = soup.find('div', id='article_content')
@@ -892,14 +914,44 @@ async def on_message(message):
                         color=0x2C2F33
                     )
                     await message.channel.send(embed=embed)
+                    pending_suppress_ids.add(message.id)
+                    try:
+                        await message.edit(suppress=True)
+                    except Exception as e:
+                        print(f"無法隱藏原始訊息預覽: {e}")
+                    return
 
-                    return  # 提前結束該次事件
-
-                # --- 以下為成功取得真實內容的正常解析邏輯 ---
+                # --- 正常解析流程 ---
                 target_html_block = str(article_content)
 
                 title_tag = soup.find('h1', class_='article-title')
                 title = title_tag.text.strip() if title_tag else "小屋創作"
+
+                # --- 新增：解析作者資訊 (名稱、個人首頁、頭像) ---
+                author_name = ""
+                author_url = None
+                author_avatar = None
+
+                # 1. 抓取作者名稱與小屋網址
+                author_a_tag = soup.find('a', class_=re.compile(r'\bcaption-text\b.*\bprimary\b'))
+                if not author_a_tag:
+                    author_a_tag = soup.find('a', class_='caption-text primary')
+
+                if author_a_tag:
+                    author_name = author_a_tag.text.strip()
+                    author_href = author_a_tag.get('href', '')
+                    if author_href:
+                        author_url = author_href if author_href.startswith(
+                            'http') else f"https://home.gamer.com.tw/{author_href.lstrip('/')}"
+
+                # 2. 抓取作者頭像圖片網址
+                avatar_img_tag = soup.select_one('a.user-avatar-img img')
+                if avatar_img_tag:
+                    raw_avatar_src = avatar_img_tag.get('src') or avatar_img_tag.get('data-src') or ""
+                    if raw_avatar_src.startswith('//'):
+                        author_avatar = 'https:' + raw_avatar_src
+                    elif raw_avatar_src.startswith('http'):
+                        author_avatar = raw_avatar_src
 
                 date_str = ""
                 for span in soup.find_all('span', class_='caption-text'):
@@ -919,7 +971,7 @@ async def on_message(message):
                         try:
                             encoded_url = href.split('redir.php?url=')[1].split('&')[0]
                             href = urllib.parse.unquote(encoded_url)
-                        except:
+                        except Exception:
                             pass
 
                     link_text = a.get_text(separator='').strip()
@@ -928,19 +980,16 @@ async def on_message(message):
                     else:
                         a.unwrap()
 
-                        # 處理換行
                 for br in article_content.find_all('br'):
                     br.replace_with('\n')
                 for div in article_content.find_all(['div', 'p']):
                     div.append('\n')
 
-                # 提取純文字並安全截斷
                 raw_text = article_content.get_text(separator='').strip()
                 clean_text = re.sub(r'\n{2,}', '\n', raw_text)
 
                 if len(clean_text) > 150:
                     clean_text = clean_text[:150]
-                    # 避免切斷 Markdown 語法
                     clean_text = re.sub(r'\[[^\]]*$|\[[^\]]*\]\([^)]*$', '', clean_text).strip()
                     clean_text = re.sub(r'[-*]+$', '', clean_text).strip()
                     clean_text += "..."
@@ -977,7 +1026,15 @@ async def on_message(message):
                     color=0x00B4D8
                 )
 
-                footer_text = f"巴哈姆特 • {section_name}"
+                # --- 新增：設定作者頂部標頭 (顯示頭像與名稱，點擊可前往小屋) ---
+                if author_name:
+                    main_embed.set_author(
+                        name=author_name,
+                        url=author_url,
+                        icon_url=author_avatar
+                    )
+
+                footer_text = f"巴哈姆特 • 小屋創作"
                 if date_str:
                     footer_text += f" • {date_str}"
                 main_embed.set_footer(text=footer_text)
@@ -992,17 +1049,17 @@ async def on_message(message):
                     embeds.append(sub_embed)
 
                 await message.channel.send(embeds=embeds)
+                baha_artwork_cache[url] = embeds
 
-                # 登記這則訊息，交給 on_message_edit 負責後續補刀
                 pending_suppress_ids.add(message.id)
-
                 try:
                     await message.edit(suppress=True)
                 except Exception as e:
                     print(f"無法隱藏原始訊息預覽: {e}")
 
         except Exception as e:
-            print(f"解析巴哈姆特網址時發生錯誤: {e}")
+            print(f"處理 巴哈姆特 網址時發生錯誤: {e}")
+
 
     # ================= 處理 4Gamers 網址 =================
     if re.search(FOURGAMERS_PATTERN, message.content):
