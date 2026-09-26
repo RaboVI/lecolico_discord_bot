@@ -90,7 +90,7 @@ INSTAGRAM_PATTERN = r"(https?://(www\.)?instagram\.com/[^\s]+)"
 # 匹配 x.com 或 twitter.com 的貼文網址
 X_PATTERN = r"(https?://(www\.)?(x|twitter)\.com/[^\s]+/status/\d+)"
 # 巴哈姆特網址正規表達式
-BAHA_PATTERN = r"(https?://(gnn|forum|home)\.gamer\.com\.tw/[^\s]+)"
+BAHA_PATTERN = r"(https?://(?:(gnn|forum|home)\.gamer\.com\.tw|m\.gamer\.com\.tw/forum)/[^\s]+)"
 # 4Gamers 網址正規表達式
 FOURGAMERS_PATTERN = r"(https?://(www\.)?4gamers\.com\.tw/news/detail/\d+/[^\s]+)"
 # 《勝利女神：妮姬》官網新聞網址正規表達式 (支援一般版與 /m/ 手機版)
@@ -761,7 +761,15 @@ async def on_message(message):
                     print(f"無法隱藏原始訊息預覽: {e}")
 
             # ================= 2. 哈啦版處理 =================
-            elif "forum.gamer.com.tw" in url:
+            elif "forum.gamer.com.tw" in url or "m.gamer.com.tw/forum" in url:
+                # 若為手機版網址，自動轉換為 PC 版標準網址進行請求與解析
+                if "m.gamer.com.tw/forum" in url:
+                    url = url.replace("m.gamer.com.tw/forum", "forum.gamer.com.tw")
+
+                res = requests.get(url, headers=headers)
+                res.encoding = 'utf-8'
+                soup = BeautifulSoup(res.text, 'html.parser')
+
                 # 嘗試透過 data-gtm 定位，優先抓取 title 屬性
                 board_tag = soup.find('a', attrs={'data-gtm': '選單-看板名稱'})
                 if board_tag and board_tag.get('title'):
@@ -773,102 +781,100 @@ async def on_message(message):
                     section_name = board_match.group(1).strip() if board_match else "哈啦板"
 
                 first_post = soup.find('section', class_='c-section')
+                if not first_post:
+                    return
 
-                if first_post:
-                    title_tag = first_post.find('h1', class_='c-post__header__title')
-                    title = title_tag.text.strip() if title_tag else "哈啦版文章"
+                title_tag = first_post.find('h1', class_='c-post__header__title')
+                title = title_tag.text.strip() if title_tag else "哈啦版文章"
 
-                    date_tag = first_post.find('a', class_='edittime')
-                    date_str = date_tag.text.strip() if date_tag else ""
+                date_tag = first_post.find('a', class_='edittime')
+                date_str = date_tag.text.strip() if date_tag else ""
 
-                    article_content = first_post.find('div', class_='c-article__content')
-                    target_html_block = str(article_content) if article_content else ""
+                article_content = first_post.find('div', class_='c-article__content')
+                target_html_block = str(article_content) if article_content else ""
 
-                    # 處理內文：利用 separator='\n' 解析排版，並壓縮連續空行
-                    if article_content:
-                        # 強制在不同 HTML 標籤區塊間插入換行符號
-                        raw_text = article_content.get_text(separator='\n').strip()
-                        # 將 2 個以上的連續換行壓縮為 1 個換行 (達到分段但不空行的效果)
-                        clean_text = re.sub(r'\n{2,}', '\n', raw_text)
-                    else:
-                        clean_text = ""
+                # 處理內文：利用 separator='\n' 解析排版，並壓縮連續空行
+                if article_content:
+                    raw_text = article_content.get_text(separator='\n').strip()
+                    clean_text = re.sub(r'\n{2,}', '\n', raw_text)
+                else:
+                    clean_text = ""
 
-                    if len(clean_text) > 100:
-                        clean_text = clean_text[:100] + "..."
+                if len(clean_text) > 100:
+                    clean_text = clean_text[:100] + "..."
 
-                    block_soup = BeautifulSoup(target_html_block, 'html.parser')
+                block_soup = BeautifulSoup(target_html_block, 'html.parser')
 
-                    # 過濾圖片與抓取
-                    img_urls = []
-                    for img in block_soup.find_all('img'):
-                        src = img.get('data-src') or img.get('src') or ""
-                        class_name = " ".join(img.get('class', [])).lower()
+                # 過濾圖片與抓取
+                img_urls = []
+                for img in block_soup.find_all('img'):
+                    src = img.get('data-src') or img.get('src') or ""
+                    class_name = " ".join(img.get('class', [])).lower()
 
-                        if 'smilie' in class_name or 'emoji' in class_name:
-                            continue
-                        # 加入 editor/emotion 過濾條件
-                        if 'plugins/smiles' in src or 'forum/smiles' in src or 'editor/emotion' in src:
-                            continue
+                    if 'smilie' in class_name or 'emoji' in class_name:
+                        continue
+                    if 'plugins/smiles' in src or 'forum/smiles' in src or 'editor/emotion' in src:
+                        continue
 
-                        if src and src.startswith('http') and '1x1.gif' not in src:
-                            if src not in img_urls:
-                                img_urls.append(src)
+                    if src and src.startswith('http') and '1x1.gif' not in src:
+                        if src not in img_urls:
+                            img_urls.append(src)
 
-                    preview_images = img_urls[:3]
+                preview_images = img_urls[:3]
 
-                    # 尋找 iframe 內的 YouTube 連結
-                    first_yt = None
-                    yt_iframe = block_soup.find('iframe', attrs={'src': re.compile(r'youtube\.com/embed/')})
-                    if not yt_iframe:
-                        yt_iframe = block_soup.find('iframe', attrs={'data-src': re.compile(r'youtube\.com/embed/')})
+                # 尋找 iframe 內的 YouTube 連結
+                first_yt = None
+                yt_iframe = block_soup.find('iframe', attrs={'src': re.compile(r'youtube\.com/embed/')})
+                if not yt_iframe:
+                    yt_iframe = block_soup.find('iframe', attrs={'data-src': re.compile(r'youtube\.com/embed/')})
 
-                    if yt_iframe:
-                        yt_src = yt_iframe.get('src') or yt_iframe.get('data-src')
-                        match = re.search(r'embed/([a-zA-Z0-9_-]+)', yt_src)
-                        if match:
-                            first_yt = f"https://www.youtube.com/watch?v={match.group(1)}"
+                if yt_iframe:
+                    yt_src = yt_iframe.get('src') or yt_iframe.get('data-src')
+                    match = re.search(r'embed/([a-zA-Z0-9_-]+)', yt_src)
+                    if match:
+                        first_yt = f"https://www.youtube.com/watch?v={match.group(1)}"
 
-                    if not first_yt:
-                        yt_urls = re.findall(r'https?://(?:www\.)?(?:youtube\.com/watch\?v=|youtu\.be/)[a-zA-Z0-9_-]+',
-                                             target_html_block)
-                        if yt_urls:
-                            first_yt = yt_urls[0]
+                if not first_yt:
+                    yt_urls = re.findall(r'https?://(?:www\.)?(?:youtube\.com/watch\?v=|youtu\.be/)[a-zA-Z0-9_-]+',
+                                         target_html_block)
+                    if yt_urls:
+                        first_yt = yt_urls[0]
 
-                    embeds = []
-                    main_embed = discord.Embed(
-                        title=title,
-                        url=url,
-                        description=clean_text if clean_text else "無文字內容",
-                        color=0x00B4D8
-                    )
+                embeds = []
+                main_embed = discord.Embed(
+                    title=title,
+                    url=url,
+                    description=clean_text if clean_text else "無文字內容",
+                    color=0x00B4D8
+                )
 
-                    # 組合 Footer
-                    footer_text = f"巴哈姆特 • {section_name}"
-                    if date_str:
-                        footer_text += f" • {date_str}"
-                    main_embed.set_footer(text=footer_text)
+                # 組合 Footer
+                footer_text = f"巴哈姆特 • {section_name}"
+                if date_str:
+                    footer_text += f" • {date_str}"
+                main_embed.set_footer(text=footer_text)
 
-                    if preview_images:
-                        main_embed.set_image(url=preview_images[0])
-                    embeds.append(main_embed)
+                if preview_images:
+                    main_embed.set_image(url=preview_images[0])
+                embeds.append(main_embed)
 
-                    for img_url in preview_images[1:]:
-                        sub_embed = discord.Embed(url=url)
-                        sub_embed.set_image(url=img_url)
-                        embeds.append(sub_embed)
+                for img_url in preview_images[1:]:
+                    sub_embed = discord.Embed(url=url)
+                    sub_embed.set_image(url=img_url)
+                    embeds.append(sub_embed)
 
-                    if first_yt:
-                        await message.channel.send(content=first_yt)
+                if first_yt:
+                    await message.channel.send(content=first_yt)
 
-                    await message.channel.send(embeds=embeds)
+                await message.channel.send(embeds=embeds)
 
-                    # 登記這則訊息，交給 on_message_edit 負責後續補刀
-                    pending_suppress_ids.add(message.id)
+                # 登記這則訊息，交給 on_message_edit 負責後續補刀
+                pending_suppress_ids.add(message.id)
 
-                    try:
-                        await message.edit(suppress=True)
-                    except Exception as e:
-                        print(f"無法隱藏原始訊息預覽: {e}")
+                try:
+                    await message.edit(suppress=True)
+                except Exception as e:
+                    print(f"無法隱藏原始訊息預覽: {e}")
 
             # ================= 3. 小屋創作處理 =================
             elif "home.gamer.com.tw" in url:
