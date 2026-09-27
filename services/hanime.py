@@ -5,20 +5,27 @@ from bs4 import BeautifulSoup
 from curl_cffi import requests
 from cachetools import TTLCache
 
-# 建立記憶體快取：最多保留 100 筆資料，每筆快取存活 60 分鐘 (3600 秒)
-hanime_cache = TTLCache(maxsize=100, ttl=3600)
+# 建立記憶體快取：最多保留 100 筆資料，每筆快取存活 30 分鐘 (1800 秒)
+hanime_cache = TTLCache(maxsize=100, ttl=1800)
 
-# 偽裝一般桌面瀏覽器請求標頭
+# 方案 1：補齊高擬真的完整桌面 Chrome 124 Headers (含 Client Hints 與 Sec 標頭)
 REQUEST_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+    "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7",
     "Referer": "https://hanime1.me/",
-    "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7"
+    "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"Windows"',
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "same-origin",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1"
 }
-
 
 class HanimeHighResView(discord.ui.View):
     """Embed 底部的最高畫質跳轉按鈕"""
-
     def __init__(self, best_quality_label: str, best_video_url: str):
         super().__init__(timeout=None)
         self.add_item(discord.ui.Button(
@@ -32,18 +39,31 @@ def _fetch_hanime_data_sync(url: str) -> dict | None:
     """
     同步爬取與解析 Hanime1 頁面資料（優先讀取 TTLCache 快取）
     """
-    # 1. 檢查快取是否存在
     if url in hanime_cache:
         print(f"[Hanime1] 命中快取，直接讀取: {url}")
         return hanime_cache[url]
 
-    try:
-        print(f"[Hanime1] 正在向目標請求資料: {url}")
-        resp = requests.get(url, headers=REQUEST_HEADERS, impersonate="chrome120", timeout=12)
-        if resp.status_code != 200:
-            print(f"[Hanime1] 請求失敗，狀態碼: {resp.status_code}")
-            return None
+    resp = None
+    # 嘗試策略：優先 chrome124，若被擋則輪替 safari17_0 嘗試突破
+    impersonate_targets = ["chrome124", "safari17_0"]
 
+    for imp in impersonate_targets:
+        try:
+            print(f"[Hanime1] 正在向目標請求資料 ({imp}): {url}")
+            r = requests.get(url, headers=REQUEST_HEADERS, impersonate=imp, timeout=12)
+            if r.status_code == 200:
+                resp = r
+                break
+            else:
+                print(f"[Hanime1] 指紋 {imp} 請求失敗，狀態碼: {r.status_code}")
+        except Exception as e:
+            print(f"[Hanime1] 指紋 {imp} 握手例外: {e}")
+
+    if not resp:
+        print("[Hanime1] 所有指紋策略皆失敗，無法取得頁面。")
+        return None
+
+    try:
         soup = BeautifulSoup(resp.text, "html.parser")
 
         # 提取影片畫質清單
@@ -142,7 +162,7 @@ def _fetch_hanime_data_sync(url: str) -> dict | None:
             "cover_image": cover_image
         }
 
-        # 2. 寫入快取 (保存 30 分鐘)
+        # 寫入快取 (保存 30 分鐘)
         hanime_cache[url] = result_data
         return result_data
 
