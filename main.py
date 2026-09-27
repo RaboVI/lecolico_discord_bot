@@ -11,6 +11,8 @@ from bs4 import BeautifulSoup
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 from cachetools import TTLCache
+# --- 引入外部 services 模組 ---
+from services.hanime import process_hanime_embed
 
 # 自動讀取本地 .env 檔案中的環境變數
 # 若在 Railway 線上運行，Railway 會直接提供環境變數，此函式會自動略過而不報錯
@@ -101,6 +103,8 @@ BAHA_PATTERN = r"(https?://(?:(gnn|forum|home)\.gamer\.com\.tw|m\.gamer\.com\.tw
 FOURGAMERS_PATTERN = r"(https?://(www\.)?4gamers\.com\.tw/news/detail/\d+/[^\s]+)"
 # 《勝利女神：妮姬》官網新聞網址正規表達式 (支援一般版與 /m/ 手機版)
 NIKKE_PATTERN = r"(https?://nikke\.hotcool\.tw/(?:m/)?News_detail-\d+)"
+# Hanime1 網址正規表達式
+HANIME_PATTERN = r"(https?://hanime1\.me/watch\?v=\d+)"
 
 
 async def process_ptt_embed(target_ptt_url: str, display_url: str, message: discord.Message, source_name: str = "PTT"):
@@ -1297,6 +1301,12 @@ async def on_message(message):
             except Exception as e:
                 print(f"處理妮姬官網公告時發生錯誤: {e}")
 
+    # ================= 處理 Hanime1 網址 =================
+    if re.search(HANIME_PATTERN, message.content):
+        hanime_match = re.search(HANIME_PATTERN, message.content)
+        if hanime_match:
+            target_url = hanime_match.group(0)
+            await process_hanime_embed(target_url, message, pending_suppress_ids)
 
 # 啟動 Bot，請將引號內替換為你的 Token
 DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN")
