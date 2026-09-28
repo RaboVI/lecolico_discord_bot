@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 from cachetools import TTLCache
 # --- 引入外部 services 模組 ---
 from services.hanime import process_hanime_embed
+from services.pixiv import process_pixiv_embed
 
 # 自動讀取本地 .env 檔案中的環境變數
 # 若在 Railway 線上運行，Railway 會直接提供環境變數，此函式會自動略過而不報錯
@@ -105,6 +106,8 @@ FOURGAMERS_PATTERN = r"(https?://(www\.)?4gamers\.com\.tw/news/detail/\d+/[^\s]+
 NIKKE_PATTERN = r"(https?://nikke\.hotcool\.tw/(?:m/)?News_detail-\d+)"
 # Hanime1 網址正規表達式
 HANIME_PATTERN = r"(https?://hanime1\.me/watch\?v=\d+)"
+# 匹配 Pixiv 網址 (支援 artworks/ID、member_illust.php 與 /i/ID)
+PIXIV_PATTERN = r"(https?://(?:www\.)?pixiv\.net/(?:(?:en/)?artworks/|member_illust\.php\?illust_id=)(\d+)|https?://pixiv\.net/i/(\d+))"
 
 
 async def process_ptt_embed(target_ptt_url: str, display_url: str, message: discord.Message, source_name: str = "PTT"):
@@ -1307,6 +1310,14 @@ async def on_message(message):
         if hanime_match:
             target_url = hanime_match.group(0)
             await process_hanime_embed(target_url, message, pending_suppress_ids)
+
+    # ================= 處理 Pixiv 網址 =================
+    pixiv_match = re.search(PIXIV_PATTERN, message.content)
+    if pixiv_match:
+        # 從捕獲群組中提取純數字 illust_id (群組 2 或群組 3)
+        illust_id = pixiv_match.group(2) or pixiv_match.group(3)
+        original_url = f"https://www.pixiv.net/artworks/{illust_id}"
+        await process_pixiv_embed(illust_id, original_url, message, pending_suppress_ids)
 
 # 啟動 Bot，請將引號內替換為你的 Token
 DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN")
