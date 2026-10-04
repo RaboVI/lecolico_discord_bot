@@ -9,3 +9,5 @@ python-dotenv
 cachetools
 
 curl_cffi
+
+Pillow
