@@ -15,6 +15,7 @@ from cachetools import TTLCache
 from services.hanime import process_hanime_embed
 from services.pixiv import process_pixiv_embed
 from services.Gamekee_BD2 import process_gamekee_bd2_embed
+from services.Nikke_Official_tw import process_nikke_embed
 
 # 自動讀取本地 .env 檔案中的環境變數
 # 若在 Railway 線上運行，Railway 會直接提供環境變數，此函式會自動略過而不報錯
@@ -78,14 +79,6 @@ class ReadButtonView(discord.ui.View):
             style=discord.ButtonStyle.link
         ))
 
-class NewsButtonView(discord.ui.View):
-    def __init__(self, news_url: str):
-        super().__init__(timeout=None)
-        self.add_item(discord.ui.Button(
-            label="📢 查看全文",
-            url=news_url,
-            style=discord.ButtonStyle.link
-        ))
 
 # 用正規表達式比對 wnacg 的網址
 URL_PATTERN = r"(https?://(www\.)?wnacg\.com/photos-index-aid-\d+\.html)"
@@ -1197,115 +1190,11 @@ async def on_message(message):
             except Exception as e:
                 print(f"處理 4Gamers 網址時發生錯誤: {e}")
 
-    # ================= 處理《勝利女神：妮姬》官網新聞 =================
-    if re.search(NIKKE_PATTERN, message.content):
-        nikke_match = re.search(NIKKE_PATTERN, message.content)
-        if nikke_match:
-            raw_nikke_url = nikke_match.group(0)
-
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-            }
-
-            try:
-                res = requests.get(raw_nikke_url, headers=headers, timeout=10)
-                res.encoding = 'utf-8'
-                soup = BeautifulSoup(res.text, 'html.parser')
-
-                # 1. 標題提取
-                title_div = soup.find('div', class_='title')
-                title = title_div.text.strip() if title_div else "《勝利女神：妮姬》最新公告"
-
-                # 2. 日期與分類標籤提取 (從 class="time" 容器中解析)
-                date_str = ""
-                tag_str = ""
-                time_container = soup.find('div', class_=re.compile(r'\btime\b'))
-                if time_container:
-                    spans = time_container.find_all('span')
-                    if len(spans) > 0:
-                        # 將 2026.09.04 轉換為 2026/09/04
-                        raw_date = spans[0].text.strip()
-                        date_str = raw_date.replace('.', '/')
-                    if len(spans) > 1:
-                        tag_str = spans[1].text.strip()
-
-                # 3. 內文提取 (支援表格解析與緊湊排版)
-                clean_text = ""
-                content_div = soup.find('div', id='content')
-                if content_div:
-                    c_soup = BeautifulSoup(str(content_div), 'html.parser')
-
-                    # --- 表格特別處理 ---
-                    table = c_soup.find('table')
-                    if table:
-                        rows = table.find_all('tr')
-                        formatted_rows = []
-
-                        # 逐列解析 (跳過第 0 列的表頭標題)
-                        for tr in rows[1:]:
-                            cols = [td.get_text().strip() for td in tr.find_all(['td', 'th'])]
-                            cols = [c for c in cols if c]
-                            if cols:
-                                # 組裝為：帳號 [伺服器] 停權時間 (例如: U***9 [GL] 10年)
-                                if len(cols) >= 4:
-                                    formatted_rows.append(f"`• {cols[0]} | {cols[1]} | {cols[3]}`")
-                                else:
-                                    formatted_rows.append(f"`• {' | '.join(cols)}`")
-
-                        # 只取前 5 筆展示，其餘提示查看全文
-                        preview_table_text = "\n".join(formatted_rows[:5])
-                        total_count = len(rows) - 1
-                        if total_count > 5:
-                            preview_table_text += f"\n`... 等共 {total_count} 筆名單 (請點擊按鈕查看全文)`"
-
-                        # 將原本的 table 標籤替換為美化後的格式化清單
-                        table.replace_with(
-                            BeautifulSoup(f"\n\n📋 **處置名單摘要**：\n{preview_table_text}\n\n", 'html.parser'))
-
-                    # 移除所有只包含 &nbsp; (\xa0) 或純空格的空段落
-                    for div in c_soup.find_all('div'):
-                        if not div.text.replace('\xa0', '').strip():
-                            div.decompose()
-
-                    # 逐行清洗
-                    raw_lines = c_soup.get_text(separator='\n').splitlines()
-                    clean_lines = [line.strip() for line in raw_lines if line.strip()]
-                    clean_text = "\n".join(clean_lines)
-
-                    # 限制 400 字元
-                    if len(clean_text) > 400:
-                        clean_text = clean_text[:400].rstrip() + "..."
-
-                # 4. 組裝 Embed (妮姬品牌亮橘色 0xF34A1B)
-                embed = discord.Embed(
-                    title=title,
-                    url=raw_nikke_url,
-                    description=clean_text if clean_text else "點擊標題前往官方網站查看公告全文。",
-                    color=0xF34A1B
-                )
-
-                # 組裝 Footer
-                footer_parts = ["勝利女神:妮姬"]
-                if tag_str:
-                    footer_parts.append(tag_str)
-                if date_str:
-                    footer_parts.append(date_str)
-                embed.set_footer(text=" • ".join(footer_parts))
-
-                # 5. 建立按鈕 View 並發送 Embed
-                view = NewsButtonView(news_url=raw_nikke_url)
-                await message.channel.send(embed=embed, view=view)
-
-                # 登記訊息，交由 on_message_edit 處理後續壓抑
-                pending_suppress_ids.add(message.id)
-
-                try:
-                    await message.edit(suppress=True)
-                except Exception as e:
-                    print(f"無法隱藏原始訊息預覽: {e}")
-
-            except Exception as e:
-                print(f"處理妮姬官網公告時發生錯誤: {e}")
+    # ================= 處理《勝利女神：妮姬》台灣官網新聞 =================
+    nikke_match = re.search(NIKKE_PATTERN, message.content)
+    if nikke_match:
+        raw_nikke_url = nikke_match.group(0)
+        await process_nikke_embed(raw_nikke_url, message, pending_suppress_ids)
 
     # ================= 處理 Hanime1 網址 =================
     if re.search(HANIME_PATTERN, message.content):
