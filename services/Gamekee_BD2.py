@@ -1,6 +1,7 @@
 import io
 import re
 import json
+import time
 import asyncio
 from datetime import datetime
 from PIL import Image
@@ -8,10 +9,11 @@ from curl_cffi import requests
 from curl_cffi.requests import AsyncSession
 import discord
 
-# 記憶體拼圖快取字典 (Key: battle_id, Value: bytes)
-LINEUP_IMAGE_CACHE: dict[int, bytes] = {}
+# --- 輕量級 TTL 記憶體快取 (Key: battle_id, Value: (timestamp, image_bytes)) ---
+LINEUP_IMAGE_CACHE: dict[int, tuple[float, bytes]] = {}
+CACHE_TTL = 86400  # 快取存活時間：24小時 (86400秒)
 
-# 共用請求標頭 (完整模擬 Chrome 124 並附帶 Gamekee 遊戲專屬識別)
+# 共用請求標頭
 GAMEKEE_HEADERS = {
     'Accept': 'application/json, text/plain, */*',
     'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7',
@@ -55,128 +57,196 @@ def extract_node_text(node) -> str:
     return ""
 
 
+def extract_node_images(node) -> list:
+    """備用方案：遞迴尋找一般靜態圖片網址"""
+    images = []
+    if isinstance(node, dict):
+        src = node.get("src") or node.get("url") or node.get("img")
+        if src and isinstance(src, str) and any(
+                ext in src.lower() for ext in [".png", ".jpg", ".jpeg", ".webp", ".gif"]):
+            clean_url = f"https:{src}" if src.startswith("//") else src
+            images.append(clean_url.split("?")[0])
+        for v in node.values():
+            if isinstance(v, (dict, list)):
+                images.extend(extract_node_images(v))
+    elif isinstance(node, list):
+        for sub in node:
+            images.extend(extract_node_images(sub))
+    return images
+
+
 def find_battle_id(nodes) -> int | None:
-    """在節點樹中尋找嵌入的戰鬥陣容 ID (例如 670)"""
+    """尋找陣容 ID (深度防呆挖掘版，支援 tempId)"""
 
     def _search(item):
         if isinstance(item, dict):
-            if item.get("type") in ["bd2-battle", "battle", "lineup", "role-team"]:
-                val = item.get("id") or item.get("battle_id") or item.get("content_id")
+            n_type = item.get("type", "").lower()
+
+            # 1. 檢查是否為自訂陣容模組
+            if any(k in n_type for k in ["battle", "team", "lineup", "guild", "role", "module", "component"]):
+                val = item.get("id") or item.get("battle_id") or item.get("content_id") or item.get(
+                    "team_id") or item.get("tempId")
                 if val:
                     try:
-                        return int(val)
+                        v_int = int(val)
+                        if 10 < v_int < 100000:
+                            return v_int
                     except ValueError:
                         pass
+
+                # 深層尋找：Gamekee 經常把真實 ID 藏在 "data" 字典裡
+                if "data" in item and isinstance(item["data"], dict):
+                    val = item["data"].get("id") or item["data"].get("tempId")
+                    if val:
+                        try:
+                            v_int = int(val)
+                            if 10 < v_int < 100000:
+                                return v_int
+                        except ValueError:
+                            pass
+
             for v in item.values():
                 res = _search(v)
-                if res:
-                    return res
+                if res: return res
         elif isinstance(item, list):
             for sub in item:
                 res = _search(sub)
-                if res:
-                    return res
+                if res: return res
         return None
 
     found_id = _search(nodes)
-    if not found_id:
-        raw_str = json.dumps(nodes)
-        m = re.search(r'"(?:battle_id|battleId|bd2BattleId)":\s*(\d+)', raw_str)
-        if m:
-            found_id = int(m.group(1))
-    return found_id
+    if found_id:
+        return found_id
+
+    # 2. 終極備案：直接對 JSON 字串進行正則檢索 (限 2~5 位數的安全 ID，加入 tempId)
+    raw_str = json.dumps(nodes)
+    m = re.search(r'"(?:id|battle_id|team_id|tempId)":\s*"?(\d{2,5})"?\b', raw_str, re.IGNORECASE)
+    if m:
+        return int(m.group(1))
+
+    return None
 
 
-def fetch_battle_team_avatars(battle_id: int, req_headers: dict) -> list:
-    """呼叫 POST /v1/bd2Battle/detail 取得出戰隊伍的 5 張角色頭像網址"""
+def fetch_battle_team_data(battle_id: int, req_headers: dict) -> dict:
+    """呼叫 API 取得出戰隊伍資料"""
     battle_api = "https://www.gamekee.com/v1/bd2Battle/detail"
     headers = req_headers.copy()
     headers['Content-Type'] = 'application/json;charset=UTF-8'
 
+    result = {"avatars": [], "title": "", "desc": ""}
     try:
-        res = requests.post(
-            battle_api,
-            headers=headers,
-            json={"id": battle_id},
-            impersonate="chrome124",
-            timeout=8
-        )
+        res = requests.post(battle_api, headers=headers, json={"id": battle_id}, impersonate="chrome124", timeout=8)
         if res.status_code == 200:
             data = res.json().get("data", {})
             raw_team = data.get("team", [])
 
-            roles = []
-            if raw_team and isinstance(raw_team, list):
-                if len(raw_team) > 0 and isinstance(raw_team[0], list):
-                    roles = raw_team[0]
-                else:
-                    roles = raw_team
+            result["title"] = data.get("title", "")
+            result["desc"] = data.get("desc", "")
 
-            avatars = []
-            for member in roles[:5]:
-                if isinstance(member, dict):
-                    raw_avatar = member.get("avatar", "")
-                    if raw_avatar:
-                        clean_url = f"https:{raw_avatar}" if raw_avatar.startswith("//") else raw_avatar
-                        clean_url = clean_url.split("?")[0]
-                        avatars.append(clean_url)
-            return avatars
+            team_groups = []
+            if isinstance(raw_team, list):
+                if len(raw_team) > 0 and isinstance(raw_team[0], list):
+                    team_groups = raw_team
+                else:
+                    team_groups = [raw_team]
+
+            avatar_groups = []
+            for group in team_groups:
+                current_row_avatars = []
+                for member in group:
+                    if isinstance(member, dict):
+                        raw_avatar = member.get("avatar", "")
+                        if raw_avatar:
+                            clean_url = f"https:{raw_avatar}" if raw_avatar.startswith("//") else raw_avatar
+                            clean_url = clean_url.split("?")[0]
+                            if clean_url not in current_row_avatars:
+                                current_row_avatars.append(clean_url)
+                if current_row_avatars:
+                    avatar_groups.append(current_row_avatars)
+
+            result["avatars"] = avatar_groups
     except Exception as e:
         print(f"[Gamekee BD2] 獲取戰鬥陣容失敗: {e}")
-    return []
+    return result
 
 
 async def download_image_async(session: AsyncSession, url: str):
-    """非同步快速下載單張頭像小圖"""
+    """非同步下載單張頭像小圖"""
     try:
         h = GAMEKEE_HEADERS.copy()
         h['Referer'] = 'https://www.gamekee.com/'
         res = await session.get(url, headers=h, impersonate="chrome124", timeout=5)
         if res.status_code == 200:
-            return Image.open(io.BytesIO(res.content)).convert("RGBA")
+            return url, Image.open(io.BytesIO(res.content)).convert("RGBA")
     except Exception:
         pass
-    return None
+    return url, None
 
 
-async def create_fast_horizontal_strip(battle_id: int, image_urls: list) -> io.BytesIO | None:
-    """
-    非同步並行下載 5 張頭像並水平拼貼為橫條圖 (支援記憶體快取)
-    """
-    # 1. 檢查快取
+async def create_multi_row_lineup_strip(battle_id: int, avatar_groups: list) -> io.BytesIO | None:
+    """動態多排陣容圖合成器 (支援 TTL 快取)"""
     if battle_id in LINEUP_IMAGE_CACHE:
-        return io.BytesIO(LINEUP_IMAGE_CACHE[battle_id])
+        ts, img_bytes = LINEUP_IMAGE_CACHE[battle_id]
+        if time.time() - ts < CACHE_TTL:
+            return io.BytesIO(img_bytes)
 
-    if not image_urls:
+    if not avatar_groups:
         return None
 
-    target_urls = image_urls[:5]
-    async with AsyncSession() as session:
-        tasks = [download_image_async(session, u) for u in target_urls]
-        downloaded = await asyncio.gather(*tasks)
+    unique_urls = list(set([url for group in avatar_groups for url in group]))
+    if not unique_urls:
+        return None
 
-    images = [img for img in downloaded if img is not None]
-    if len(images) < 2:
+    async with AsyncSession() as session:
+        tasks = [download_image_async(session, u) for u in unique_urls]
+        downloaded_results = await asyncio.gather(*tasks)
+
+    img_dict = {url: img for url, img in downloaded_results if img is not None}
+    if not img_dict:
         return None
 
     target_size = 128
-    resized_images = [img.resize((target_size, target_size), Image.Resampling.BILINEAR) for img in images]
+    spacing_x = 8
+    spacing_y = 12
 
-    spacing = 8
-    total_width = target_size * len(resized_images) + spacing * (len(resized_images) - 1)
+    rows = []
+    max_row_width = 0
 
-    canvas = Image.new("RGBA", (total_width, target_size), (0, 0, 0, 0))
-    x_offset = 0
-    for img in resized_images:
-        canvas.paste(img, (x_offset, 0), mask=img)
-        x_offset += target_size + spacing
+    for group in avatar_groups:
+        row_imgs = []
+        for url in group:
+            if url in img_dict:
+                resized_img = img_dict[url].resize((target_size, target_size), Image.Resampling.BILINEAR)
+                row_imgs.append(resized_img)
+
+        if row_imgs:
+            row_width = len(row_imgs) * target_size + (len(row_imgs) - 1) * spacing_x
+            rows.append({"images": row_imgs, "width": row_width})
+            if row_width > max_row_width:
+                max_row_width = row_width
+
+    if not rows:
+        return None
+
+    total_width = max_row_width
+    total_height = len(rows) * target_size + (len(rows) - 1) * spacing_y
+
+    canvas = Image.new("RGBA", (total_width, total_height), (0, 0, 0, 0))
+
+    # 逐排靠左貼圖 (同網頁排版)
+    y_offset = 0
+    for row in rows:
+        x_offset = 0  # 起始點固定在最左側
+        for img in row["images"]:
+            canvas.paste(img, (x_offset, y_offset), mask=img)
+            x_offset += target_size + spacing_x
+        y_offset += target_size + spacing_y
 
     output = io.BytesIO()
     canvas.save(output, format="PNG")
-
-    # 存入快取供日後秒回
     img_bytes = output.getvalue()
-    LINEUP_IMAGE_CACHE[battle_id] = img_bytes
+
+    LINEUP_IMAGE_CACHE[battle_id] = (time.time(), img_bytes)
 
     output.seek(0)
     return output
@@ -190,122 +260,139 @@ async def process_gamekee_bd2_embed(content_id: str, original_url: str, message:
         req_headers = GAMEKEE_HEADERS.copy()
         req_headers['Referer'] = f"https://www.gamekee.com/zsca2/{content_id}.html"
 
-        # 1. 取得文章中繼資料與 CDN 網址
         res_detail = requests.get(detail_url, headers=req_headers, impersonate="chrome124", timeout=8)
-        if res_detail.status_code != 200:
+        if res_detail.status_code != 200 or res_detail.json().get("code") != 0:
             return
 
-        detail_json = res_detail.json()
-        if detail_json.get("code") != 0:
-            return
-
-        data_obj = detail_json.get("data", {})
+        data_obj = res_detail.json().get("data", {})
         title = data_obj.get("title", "")
         cdn_path = data_obj.get("content_cdn", "")
         view_count = data_obj.get("view_count", 0)
         updated_at_raw = data_obj.get("updated_at") or data_obj.get("created_at")
 
-        # 格式化更新時間
         updated_at_str = ""
         if updated_at_raw:
             try:
-                if isinstance(updated_at_raw, (int, float)):
-                    dt = datetime.fromtimestamp(updated_at_raw)
-                else:
-                    dt = datetime.fromisoformat(str(updated_at_raw).replace('Z', '+00:00'))
+                dt = datetime.fromtimestamp(updated_at_raw) if isinstance(updated_at_raw,
+                                                                          (int, float)) else datetime.fromisoformat(
+                    str(updated_at_raw).replace('Z', '+00:00'))
                 updated_at_str = dt.strftime("%Y/%m/%d %H:%M")
             except Exception:
-                updated_at_str = str(updated_at_raw)
+                pass
 
-        # 2. 目前專注於「魔兽」類別
-        if "魔兽" not in title and "魔獸" not in title:
+        if not any(k in title for k in ["魔兽", "魔獸", "会战", "公会战"]):
             return
 
-        # 3. 請求 CDN 取得富文本節點
         nodes = []
         if cdn_path:
-            full_cdn_url = f"https:{cdn_path}" if cdn_path.startswith("//") else cdn_path
+            full_cdn = f"https:{cdn_path}" if cdn_path.startswith("//") else cdn_path
             cdn_headers = req_headers.copy()
             cdn_headers['Referer'] = 'https://www.gamekee.com/'
-            res_cdn = requests.get(full_cdn_url, headers=cdn_headers, impersonate="chrome124", timeout=8)
+            res_cdn = requests.get(full_cdn, headers=cdn_headers, impersonate="chrome124", timeout=8)
             if res_cdn.status_code == 200:
-                raw_content = res_cdn.json().get("content", "[]")
-                nodes = json.loads(raw_content)
+                nodes = json.loads(res_cdn.json().get("content", "[]"))
 
-        # 4. 解析「本期魔兽」內文重點
         desc_lines = []
         has_highlight = False
-        boss_tip = ""
+        boss_tips = []
         target_lines = ""
+        fallback_axis_title = ""
 
         for node in nodes:
             n_type = node.get("type")
             node_text = extract_node_text(node).strip()
 
-            # 頂部高亮框 (單行灰底圓角)
-            if n_type == "highlight-block" and node_text and not has_highlight:
+            if not node_text:
+                continue
+
+            # 排除垃圾訊息
+            if "注：" in node_text or "萌新" in node_text or "配置" in node_text:
+                continue
+
+            # 頂部高亮
+            if n_type == "highlight-block" and not has_highlight:
                 desc_lines.append(f"`✨ {node_text}`")
                 has_highlight = True
+                continue
 
-            # Boss 機制 (移除 📌 符號)
-            elif ("boss" in node_text.lower() or "伤害" in node_text or "抗装" in node_text) and not boss_tip:
-                boss_tip = node_text
+            # 嚴格過濾 Boss 機制
+            lower_text = node_text.lower()
+            is_boss_tip = (
+                    ("boss" in lower_text and ("伤害" in lower_text or "抗" in lower_text)) or
+                    "本期魔兽伤害" in node_text or
+                    "本期主力" in node_text or
+                    "全员穿" in node_text
+            )
+            # 最多只抓 2 條核心機制，且限制字數小於 120 字
+            if is_boss_tip and len(node_text) < 120 and len(boss_tips) < 2 and node_text not in boss_tips:
+                boss_tips.append(node_text)
+                continue
 
-            # 低保線與絕望線 (移除 🎯 符號)
-            elif ("低保线" in node_text or "绝望线" in node_text) and not target_lines:
+            # 低保線與絕望線
+            if ("低保线" in node_text or "绝望线" in node_text) and not target_lines:
                 target_lines = node_text
+                continue
 
-        if boss_tip:
-            desc_lines.append(boss_tip)
+            # 備用抓取：捕捉作者手打的標題
+            if ("标准轴" in node_text or "高配轴" in node_text or "全自动" in node_text) and len(node_text) < 40:
+                if not fallback_axis_title:
+                    fallback_axis_title = node_text.lstrip(" |｜").strip()
+
+        if boss_tips:
+            desc_lines.append("\n".join(boss_tips))
         if target_lines:
             desc_lines.append(target_lines)
 
-        # 前方段落使用雙換行分段
         top_part = "\n\n".join(desc_lines)
 
-        # 調整 1 & 2: 改用 ### 大小，緊貼上方文字 (使用單一 \n，不留空行)
-        axis_header = "\n### ⚔️标准轴"
+        battle_id = find_battle_id(nodes)
 
-        # 調整 3: 軸標題與下方說明文字空一行 (\n\n)
-        ut_title = "攻略组CprilKat的UT妈单队全自动绝望轴（71e）"
-        ut_desc = "此轴为全自动轴，摆好站位和顺序即可开启全自动，并且只有单队，简单方便不动脑，非常推荐练度不错的懒人抄！"
-        axis_body = f"**{ut_title}**\n\n{ut_desc}"
+        axis_header_text = fallback_axis_title if fallback_axis_title else "标准轴"
+        axis_header = f"\n### ⚔️{axis_header_text}"
 
-        # 組合整體 Description
-        description = f"{top_part}{axis_header}\n{axis_body}"
+        axis_body = ""
+        strip_file = None
+        embed_image_url = None
 
-        # 5. 組裝 Embed 卡片
-        embed_color = 0x83A8FA
+        if battle_id:
+            team_data = fetch_battle_team_data(battle_id, req_headers)
+
+            if team_data["title"]:
+                axis_body = f"__**{team_data['title']}**__"
+                if team_data["desc"]:
+                    axis_body += f"\n\n{team_data['desc']}"
+
+            if team_data["avatars"]:
+                strip_io = await create_multi_row_lineup_strip(battle_id, team_data["avatars"])
+                if strip_io:
+                    strip_file = discord.File(strip_io, filename="bd2_lineup.png")
+                    embed_image_url = "attachment://bd2_lineup.png"
+
+        # 終極防呆：如果 API 沒抓到陣容大圖，去內文撈靜態圖片頂替
+        if not embed_image_url:
+            static_imgs = extract_node_images(nodes)
+            seen = set()
+            static_imgs = [x for x in static_imgs if not (x in seen or seen.add(x))]
+            if static_imgs:
+                embed_image_url = static_imgs[1] if len(static_imgs) > 1 else static_imgs[0]
+
+        description = f"{top_part}{axis_header}\n{axis_body}" if axis_body else f"{top_part}{axis_header}"
+
         embed = discord.Embed(
             title=title,
             url=original_url,
             description=description,
-            color=embed_color
+            color=0x83A8FA
         )
 
-        # Footer 格式：Gamekee • 棕色尘埃2 • 🖥️ {view_count} • {updated_at}
         footer_parts = ["Gamekee", "棕色尘埃2"]
-        if view_count:
-            footer_parts.append(f"🖥️ {view_count:,}")
-        if updated_at_str:
-            footer_parts.append(updated_at_str)
+        if view_count: footer_parts.append(f"🖥️ {view_count:,}")
+        if updated_at_str: footer_parts.append(updated_at_str)
         embed.set_footer(text="  •  ".join(footer_parts))
 
-        # 6. 搜尋嵌入的戰鬥隊伍 ID 並抓取角色頭像 (支援快取)
-        battle_id = find_battle_id(nodes)
-        if not battle_id and "721950" in content_id:
-            battle_id = 670
+        if embed_image_url:
+            embed.set_image(url=embed_image_url)
 
-        strip_file = None
-        if battle_id:
-            team_avatars = fetch_battle_team_avatars(battle_id, req_headers)
-            if team_avatars:
-                strip_io = await create_fast_horizontal_strip(battle_id, team_avatars)
-                if strip_io:
-                    strip_file = discord.File(strip_io, filename="bd2_lineup.png")
-                    embed.set_image(url="attachment://bd2_lineup.png")
-
-        # 7. 建立跳轉按鈕 View 並發送訊息
         view = GamekeeLinkView(target_url=original_url)
 
         if strip_file:
