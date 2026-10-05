@@ -20,6 +20,7 @@ from services.four_gamers import process_4gamers_embed
 from services.bahamut import process_bahamut_embed
 from services.ptt import process_ptt_embed, handle_pttweb_url
 from services.twitter_x import process_x_embed
+from services.instagram import process_instagram_embed
 
 # 自動讀取本地 .env 檔案中的環境變數
 # 若在 Railway 線上運行，Railway 會直接提供環境變數，此函式會自動略過而不報錯
@@ -368,30 +369,13 @@ async def on_message(message):
             except Exception as e:
                 print(f"無法隱藏原始訊息預覽: {e}")
 
-    # ================= 新增：處理 Instagram 網址 =================
-    # 確保訊息包含 IG 連結，且沒有被代理過 (排除 og/hh/kk)
-    if re.search(INSTAGRAM_PATTERN, message.content) and not re.search(r"(og|hh|kk)instagram\.com", message.content):
+    # ================= 處理 Instagram 網址 =================
+    if re.search(INSTAGRAM_PATTERN, message.content) and not re.search(r"(og|hh|kk)instagram\.com",
+                                                                       message.content):
         ig_match = re.search(INSTAGRAM_PATTERN, message.content)
         if ig_match:
             raw_ig_url = ig_match.group(0)
-
-            # 建立代理伺服器清單
-            ig_proxies = ["oginstagram.com", "hhinstagram.com", "kkinstagram.com"]
-
-            # 隨機選擇一個代理
-            chosen_proxy = random.choice(ig_proxies)
-
-            # 將 instagram.com 替換為隨機選中的代理網域
-            fix_ig_url = re.sub(r"instagram\.com", chosen_proxy, raw_ig_url)
-
-            # 發送隱藏網址文字的超連結
-            await message.channel.send(f"[IGfix]({fix_ig_url})")
-
-            # 隱藏使用者發送的原始訊息預覽
-            try:
-                await message.edit(suppress=True)
-            except Exception as e:
-                print(f"無法隱藏原始訊息預覽: {e}")
+            await process_instagram_embed(raw_ig_url, message, pending_suppress_ids)
 
     # ================= 處理 X / Twitter 網址 =================
     if re.search(X_PATTERN, message.content) and not re.search(r"(vx|fx|fixupx|fixvx)(x|twitter)\.com",
