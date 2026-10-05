@@ -21,6 +21,7 @@ from services.bahamut import process_bahamut_embed
 from services.ptt import process_ptt_embed, handle_pttweb_url
 from services.twitter_x import process_x_embed
 from services.instagram import process_instagram_embed
+from services.threads import process_threads_embed
 
 # 自動讀取本地 .env 檔案中的環境變數
 # 若在 Railway 線上運行，Railway 會直接提供環境變數，此函式會自動略過而不報錯
@@ -348,26 +349,13 @@ async def on_message(message):
             except Exception as e:
                 print(f"無法隱藏原始訊息預覽: {e}")
 
-    # ================= 新增：處理 Threads 網址 =================
-    if re.search(THREADS_PATTERN, message.content) and "fixthreads.seria.moe" not in message.content:
+    # ================= 處理 Threads 網址 =================
+    if re.search(THREADS_PATTERN, message.content) and not re.search(r"(fzthreads\.com|fixthreads\.seria\.moe)",
+                                                                     message.content):
         threads_match = re.search(THREADS_PATTERN, message.content)
         if threads_match:
             raw_threads_url = threads_match.group(0)
-
-            # 將 threads.net 替換為 fixthreads.seria.moe
-            fix_threads_url = raw_threads_url.replace("www.threads.com", "fixthreads.seria.moe")
-
-            # 由 Bot 發送代理網址以展示完整 Threads 卡片預覽
-            await message.channel.send(f"[Threadsfix]({fix_threads_url})")
-
-            # 登記這則訊息，交給 on_message_edit 負責後續補刀
-            pending_suppress_ids.add(message.id)
-
-            # 隱藏使用者發送的原始訊息預覽
-            try:
-                await message.edit(suppress=True)
-            except Exception as e:
-                print(f"無法隱藏原始訊息預覽: {e}")
+            await process_threads_embed(raw_threads_url, message, pending_suppress_ids)
 
     # ================= 處理 Instagram 網址 =================
     if re.search(INSTAGRAM_PATTERN, message.content) and not re.search(r"(og|hh|kk)instagram\.com",
