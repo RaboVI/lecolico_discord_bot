@@ -19,6 +19,7 @@ from services.Nikke_Official_tw import process_nikke_embed
 from services.four_gamers import process_4gamers_embed
 from services.bahamut import process_bahamut_embed
 from services.ptt import process_ptt_embed, handle_pttweb_url
+from services.twitter_x import process_x_embed
 
 # 自動讀取本地 .env 檔案中的環境變數
 # 若在 Railway 線上運行，Railway 會直接提供環境變數，此函式會自動略過而不報錯
@@ -58,19 +59,6 @@ client = discord.Client(intents=intents)
 pending_suppress_ids = set()    # 追蹤「Bot 已經自己產生過 Embed」的訊息 ID
 # 用途：讓 on_message_edit 知道，如果 Discord 之後才把原生預覽貼到這則訊息上，
 # 要主動把它隱藏掉——不再靠固定延遲去「賭」時間點
-
-
-# 建立 Hashtag 自動超連結轉換函式
-def linkify_hashtags(text):
-    def replace_hashtag(match):
-        tag = match.group(1)
-        # 對標籤進行 URL 編碼 (確保中文/日文 Hashtag 連結能正常點擊)
-        encoded_tag = urllib.parse.quote(tag)
-        return f"[#{tag}](https://x.com/hashtag/{encoded_tag})"
-
-    # 正則表達式：匹配獨立的 #標籤 (排除網址內部的 # 符號與標點符號)
-    return re.sub(r'(?<!\S)#([^\s#.,!?:;，。！？]+)', replace_hashtag, text)
-
 
 class ReadButtonView(discord.ui.View):
     def __init__(self, read_url: str):
@@ -406,117 +394,12 @@ async def on_message(message):
                 print(f"無法隱藏原始訊息預覽: {e}")
 
     # ================= 處理 X / Twitter 網址 =================
-    # 確保訊息包含 X 連結，且沒有被代理過 (排除 vx, fx, fixup, fixvx 等前綴)
     if re.search(X_PATTERN, message.content) and not re.search(r"(vx|fx|fixupx|fixvx)(x|twitter)\.com",
                                                                message.content):
         x_match = re.search(X_PATTERN, message.content)
         if x_match:
             raw_x_url = x_match.group(0)
-
-            # 邏輯 4: 將網址轉換為 API 查詢網址 (將 x.com 或 twitter.com 替換為 api.vxtwitter.com)
-            api_url = re.sub(r"(x|twitter)\.com", "api.vxtwitter.com", raw_x_url)
-
-            try:
-                # 請求 API 獲取推文資料
-                response = requests.get(api_url, timeout=6)
-
-                if response.status_code == 200:
-                    tweet_data = response.json()
-
-                    has_media = tweet_data.get("hasMedia", False)
-                    media_extended = tweet_data.get("media_extended", [])
-
-                    # 判斷是否有影片或 GIF
-                    has_video_or_gif = any(m.get("type") in ["video", "gif"] for m in media_extended)
-
-                    # 邏輯 7: 沒有媒體 (純文字推文) -> 保留原生預覽
-                    if not has_media:
-                        print("此為純文字推文，保留原生預覽 (不做事)。")
-
-                    # 邏輯 9: 有影片，則隨機呼叫代理服務
-                    elif has_video_or_gif:
-                        x_proxies = ["fixvx.com", "fixupx.com"]
-                        chosen_proxy = random.choice(x_proxies)
-
-                        domain_match = re.search(r"(x|twitter)\.com", raw_x_url).group(0)
-                        fix_x_url = raw_x_url.replace(domain_match, chosen_proxy)
-
-                        await message.channel.send(f"[Xfix]({fix_x_url})")
-
-                        # 登記這則訊息，交給 on_message_edit 負責後續補刀
-                        pending_suppress_ids.add(message.id)
-
-                        try:
-                            await message.edit(suppress=True)
-                        except Exception as e:
-                            print(f"無法隱藏原始訊息預覽: {e}")
-
-                    # 邏輯 5 & 8: 有媒體且非影片 (所有圖片推文統一自組 Embed，徹底消滅 18+ 成人限制擋板並支援多圖)
-                    else:
-                        raw_text = tweet_data.get("text", "")
-                        likes = tweet_data.get("likes", 0)
-                        views = tweet_data.get("views")
-                        author_name = tweet_data.get("user_name", "")
-                        author_screen_name = tweet_data.get("user_screen_name", "")
-                        author_avatar = tweet_data.get("user_profile_image_url", "")
-                        date_epoch = tweet_data.get("date_epoch", 0)
-
-                        # 1. 將內文中的 Hashtag 轉為超連結
-                        formatted_text = linkify_hashtags(raw_text)
-
-                        # 2. 建立主卡片框架
-                        primary_embed = discord.Embed(
-                            description=formatted_text if formatted_text else None,
-                            url=raw_x_url,
-                            color=0x1DA1F2,  # Twitter 藍色
-                            timestamp=datetime.fromtimestamp(date_epoch, timezone.utc)
-                        )
-
-                        # 設定作者與頭像
-                        primary_embed.set_author(
-                            name=f"{author_name} (@{author_screen_name})",
-                            url=raw_x_url,
-                            icon_url=author_avatar if author_avatar else None
-                        )
-
-                        # 篩選所有圖片 URL
-                        image_urls = [m.get("url") for m in media_extended if m.get("url")]
-
-                        # 設定第一張圖片
-                        if image_urls:
-                            primary_embed.set_image(url=image_urls[0])
-
-                        # 3. 組合 Footer 文字 (支援千分位格式化)
-                        footer_parts = ["X", f"❤️ {likes:,}"]
-                        if views is not None:
-                            footer_parts.append(f"📷 {views:,}")
-
-                        primary_embed.set_footer(text="  •  ".join(footer_parts))
-
-                        embeds_to_send = [primary_embed]
-
-                        # 支援第 2 至 4 張圖片的原生拼貼效果 (同 url 即會自動並排)
-                        for extra_url in image_urls[1:4]:
-                            extra_embed = discord.Embed(url=raw_x_url)
-                            extra_embed.set_image(url=extra_url)
-                            embeds_to_send.append(extra_embed)
-
-                        # 發送自製 Embed 並隱藏原連結預覽
-                        await message.channel.send(embeds=embeds_to_send)
-
-                        # 登記這則訊息，交給 on_message_edit 負責後續補刀
-                        pending_suppress_ids.add(message.id)
-
-                        try:
-                            await message.edit(suppress=True)
-                        except Exception as e:
-                            print(f"無法隱藏原始訊息預覽: {e}")
-
-                else:
-                    print(f"X API 請求失敗，狀態碼: {response.status_code}")
-
-            except Exception as e:
-                print(f"處理 X 網址時發生錯誤: {e}")
+            await process_x_embed(raw_x_url, message, pending_suppress_ids)
 
     # ================= 處理 PTT 網址 =================
     ptt_match = re.search(PTT_PATTERN, message.content)
