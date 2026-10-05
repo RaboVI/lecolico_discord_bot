@@ -272,7 +272,7 @@ async def on_message(message):
                 fix_url = raw_bili_url.replace("bilibili.com", "vxbilibili.com")
 
             # 發送隱形字元加換行，讓 Discord 讀取網址產生卡片，但畫面上方不會有明顯網址
-            await message.channel.send(f"[Bilifix]({fix_url})")
+            await message.channel.send(f"[⠀]({fix_url})")
 
             # 登記這則訊息，交給 on_message_edit 負責後續補刀
             pending_suppress_ids.add(message.id)

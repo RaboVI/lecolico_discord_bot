@@ -111,7 +111,7 @@ async def process_x_embed(raw_x_url: str, message: discord.Message, pending_supp
         domain_match = re.search(r"(x|twitter)\.com", raw_x_url).group(0)
         fix_x_url = raw_x_url.replace(domain_match, chosen_proxy)
 
-        await message.channel.send(f"[Xfix]({fix_x_url})")
+        await message.channel.send(f"[⠀]({fix_x_url})")
 
         # 登記訊息交由 on_message_edit 補刀壓抑
         pending_suppress_ids.add(message.id)
