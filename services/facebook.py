@@ -16,7 +16,18 @@ REQUEST_HEADERS = {
     'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7'
 }
 
+# 定義 Cookie 檔案路徑
 FB_COOKIE_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'fb_cookies.txt')
+
+# 若本機無檔案但 Railway 環境變數有配置，自動在執行期寫入實體檔案供 yt-dlp 讀取
+if not os.path.exists(FB_COOKIE_PATH):
+    env_cookies = os.environ.get("FB_COOKIES_TEXT")
+    if env_cookies:
+        try:
+            with open(FB_COOKIE_PATH, "w", encoding="utf-8") as f:
+                f.write(env_cookies)
+        except Exception as e:
+            print(f"[Facebook] 無法從環境變數寫入 fb_cookies.txt: {e}")
 
 
 def _resolve_fb_url_sync(raw_fb_url: str) -> str:
