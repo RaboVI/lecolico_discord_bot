@@ -11,3 +11,5 @@ cachetools
 curl_cffi
 
 Pillow
+
+yt-dlp

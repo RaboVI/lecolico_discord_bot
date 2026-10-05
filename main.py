@@ -22,6 +22,7 @@ from services.ptt import process_ptt_embed, handle_pttweb_url
 from services.twitter_x import process_x_embed
 from services.instagram import process_instagram_embed
 from services.threads import process_threads_embed
+from services.facebook import process_facebook_embed
 
 # 自動讀取本地 .env 檔案中的環境變數
 # 若在 Railway 線上運行，Railway 會直接提供環境變數，此函式會自動略過而不報錯
@@ -282,72 +283,12 @@ async def on_message(message):
             except Exception as e:
                 print(f"無法隱藏原始訊息預覽: {e}")
 
-
     # ================= 處理 Facebook 網址 =================
     if re.search(FACEBOOK_PATTERN, message.content) and "facebed.com" not in message.content:
         fb_match = re.search(FACEBOOK_PATTERN, message.content)
         if fb_match:
             raw_fb_url = fb_match.group(0)
-            target_fb_url = raw_fb_url
-
-            # 針對 /share/ 短跳轉進行路徑還原
-            if "/share/" in raw_fb_url:
-                try:
-                    headers = {
-                        'User-Agent': 'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)',
-                        'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7'
-                    }
-
-                    # 1. 優先發送 HEAD 請求
-                    head_res = requests.head(raw_fb_url, headers=headers, allow_redirects=False, timeout=5)
-                    location = head_res.headers.get('Location', '')
-
-                    # (A) 直接從 Location 提取 story_fbid (雲端機房最常見且穩定的返回格式)
-                    fbid_match = re.search(r'story_fbid=(\d+)', location)
-                    if fbid_match:
-                        target_fb_url = f"https://www.facebook.com/reel/{fbid_match.group(1)}"
-
-                    # (B) 若直接跳轉至完整路徑 (如 /reel/ 或 /posts/)
-                    elif location and "/share/" not in location and "/login" not in location:
-                        target_fb_url = location.split('?')[0]
-
-                    # 2. 若 HEAD 未取得，降級至 GET 深度提取
-                    if "/share/" in target_fb_url:
-                        res = requests.get(raw_fb_url, headers=headers, allow_redirects=True, timeout=8)
-                        final_url = res.url
-
-                        # 從登入跳轉參數提取 (如 next=...story_fbid%3D123...)
-                        if "/login" in final_url or "login.php" in final_url:
-                            fbid_in_login = re.search(r'(?:story_fbid%3D|video_id%3D)(\d+)', final_url)
-                            if fbid_in_login:
-                                target_fb_url = f"https://www.facebook.com/reel/{fbid_in_login.group(1)}"
-                            else:
-                                match_next = re.search(r'[?&](?:next|u)=([^&]+)', final_url)
-                                if match_next:
-                                    decoded = urllib.parse.unquote(match_next.group(1))
-                                    if "/share/" not in decoded and "/login" not in decoded:
-                                        target_fb_url = decoded.split('?')[0]
-                        elif "/share/" not in final_url:
-                            target_fb_url = final_url.split('?')[0]
-
-                except Exception as e:
-                    print(f"解析 FB Share 短網址時發生錯誤: {e}")
-
-            # 3. 終極防呆：若最終仍是登入頁或無效頁面，退回原始網址
-            if "/login" in target_fb_url or "login.php" in target_fb_url or target_fb_url.endswith("/story.php"):
-                target_fb_url = raw_fb_url
-
-            # 替換為 facebed 代理
-            fix_fb_url = re.sub(r"(facebook\.com|fb\.watch)", "facebed.com", target_fb_url)
-
-            # 發送修復後的超連結
-            await message.channel.send(f"[FBfix]({fix_fb_url})")
-            pending_suppress_ids.add(message.id)
-
-            try:
-                await message.edit(suppress=True)
-            except Exception as e:
-                print(f"無法隱藏原始訊息預覽: {e}")
+            await process_facebook_embed(raw_fb_url, message, pending_suppress_ids)
 
     # ================= 處理 Threads 網址 =================
     if re.search(THREADS_PATTERN, message.content) and not re.search(r"(fzthreads\.com|fixthreads\.seria\.moe)",
