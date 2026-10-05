@@ -18,6 +18,7 @@ from services.Gamekee_BD2 import process_gamekee_bd2_embed
 from services.Nikke_Official_tw import process_nikke_embed
 from services.four_gamers import process_4gamers_embed
 from services.bahamut import process_bahamut_embed
+from services.ptt import process_ptt_embed, handle_pttweb_url
 
 # 自動讀取本地 .env 檔案中的環境變數
 # 若在 Railway 線上運行，Railway 會直接提供環境變數，此函式會自動略過而不報錯
@@ -106,130 +107,9 @@ HANIME_PATTERN = r"(https?://hanime1\.me/watch\?v=\d+)"
 PIXIV_PATTERN = r"(https?://(?:www\.)?pixiv\.net/(?:(?:en/)?artworks/|member_illust\.php\?illust_id=)(\d+)|https?://pixiv\.net/i/(\d+))"
 # 匹配 Gamekee底下棕色塵埃2 網址
 GAMEKEE_BD2_PATTERN = r"https?://(?:www\.)?gamekee\.com/zsca2/(\d+)\.html"
-
-
-async def process_ptt_embed(target_ptt_url: str, display_url: str, message: discord.Message, source_name: str = "PTT"):
-    """
-    共用 PTT 解析函式：
-    - target_ptt_url: 向 PTT 官方發送請求的網址 (例如 https://www.ptt.cc/bbs/...html)
-    - display_url: Embed 標題要跳轉的超連結 (如果是 PTTWeb 傳入原始網址，若原生 PTT 則傳入 target_ptt_url)
-    - source_name: Footer 顯示的來源名稱 ("PTT" 或 "PTTWeb")
-    """
-    try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        }
-        cookies = {'over18': '1'}
-
-        res = requests.get(target_ptt_url, headers=headers, cookies=cookies, timeout=10)
-        if res.status_code != 200:
-            return
-
-        soup = BeautifulSoup(res.text, 'html.parser')
-        main_content = soup.find('div', id='main-content')
-        if not main_content:
-            return
-
-        # 1. 提取作者、看板、標題、時間等元數據
-        meta_values = main_content.find_all('span', class_='article-meta-value')
-        author = meta_values[0].text.strip() if len(meta_values) > 0 else ""
-        board = meta_values[1].text.strip() if len(meta_values) > 1 else ""
-        title = meta_values[2].text.strip() if len(meta_values) > 2 else "PTT 文章"
-        raw_date_str = meta_values[3].text.strip() if len(meta_values) > 3 else ""
-
-        # 時間格式化：將 "Wed Sep  9 13:09:36 2026" 轉換為 "2026/09/09 13:09"
-        date_str = raw_date_str
-        if raw_date_str:
-            try:
-                from datetime import datetime
-                # PTT 的日期格式為 "%a %b %d %H:%M:%S %Y"（中間可能有多餘空格，strptime 會自動處理）
-                dt = datetime.strptime(re.sub(r'\s+', ' ', raw_date_str), '%a %b %d %H:%M:%S %Y')
-                date_str = dt.strftime('%Y/%m/%d %H:%M')
-            except Exception:
-                date_str = raw_date_str
-
-        # 2. 移除推文、meta 標籤、引文與簽名檔，提取純內文與主文圖片
-        content_copy = copy.copy(main_content) if 'copy' in globals() else BeautifulSoup(str(main_content),
-                                                                                         'html.parser')
-
-        # (a) 移除推文、上方 metadata 與 f2 雜訊行
-        for elem in content_copy.find_all(['div', 'span'],
-                                          class_=['article-metaline', 'article-metaline-right', 'push', 'f2']):
-            elem.decompose()
-
-        # (b) 拔除綠色引文節點 (span.f6 為 PTT 引文專用標籤)
-        for f6_elem in content_copy.find_all('span', class_='f6'):
-            f6_elem.decompose()
-
-        # (c) 針對「作者自身發言的主文區塊」提取第一張圖片
-        first_image = None
-        for a_tag in content_copy.find_all('a', href=True):
-            href = a_tag['href']
-            if re.search(r'\.(jpg|jpeg|png|gif|webp)(\?.*)?$', href,
-                         re.I) or 'i.meee.com.tw' in href or 'imgur.com' in href:
-                first_image = href
-                break
-
-        # (d) 獲取純文字並截斷簽名檔 (※ 發信站:、-- 等)
-        raw_text = content_copy.get_text()
-        raw_text = re.split(r'※\s*發信站:|--', raw_text)[0]
-
-        # 清理內文中的圖片網址 (包含常見圖床與副檔名)
-        raw_text = re.sub(r'https?://\S+?\.(?:jpg|jpeg|png|gif|webp)(?:\?\S*)?', '', raw_text,
-                          flags=re.IGNORECASE)
-        raw_text = re.sub(r'https?://(?:i\.)?imgur\.com/[a-zA-Z0-9]{5,7}', '', raw_text)
-
-        # 逐行清洗空行與文字
-        raw_lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
-        clean_lines = []
-        for line in raw_lines:
-            if line.startswith('※ 引述') or '之銘言：' in line:
-                continue
-            if re.match(r'^[::\uff1a]', line):
-                continue
-            clean_lines.append(line)
-
-        # 防呆機制：若回文作者沒有寫字 (純引用)，退回顯示原本行避免空白
-        if not clean_lines and raw_lines:
-            clean_lines = raw_lines
-
-        description = "\n".join(clean_lines)
-        if len(description) > 150:
-            description = description[:150] + "..."
-
-        # 4. 組裝 Embed (標題超連結指定為 display_url)
-        embed = discord.Embed(
-            title=title,
-            url=display_url,
-            description=description,
-            color=0xf3f3f3
-        )
-
-        if first_image:
-            embed.set_image(url=first_image)
-
-        # 組裝 Footer
-        footer_parts = [source_name]
-        if board:
-            footer_parts.append(f"{board}")
-        if date_str:
-            footer_parts.append(date_str)
-        embed.set_footer(text=" • ".join(footer_parts))
-
-        # 發送 Embed
-        await message.channel.send(embed=embed)
-
-        # 登記這則訊息，交給 on_message_edit 負責後續補刀
-        pending_suppress_ids.add(message.id)
-
-        # 隱藏原訊息預覽
-        try:
-            await message.edit(suppress=True)
-        except Exception as e:
-            print(f"無法隱藏原始訊息預覽: {e}")
-
-    except Exception as e:
-        print(f"處理 PTT/PTTWeb 解析時發生錯誤: {e}")
+# 匹配 PTT & PTTweb 網址
+PTT_PATTERN = r"https?://(?:www\.)?ptt\.cc/bbs/[^/]+/[A-Za-z0-9\._]+\.html"
+PTTWEB_PATTERN = r"https?://(?:www\.)?pttweb\.cc/(?:bbs/([^/]+)/([A-Za-z0-9\._]+)|s/([^/]+)/([A-Za-z0-9]+))"
 
 
 @client.event
@@ -639,60 +519,22 @@ async def on_message(message):
                 print(f"處理 X 網址時發生錯誤: {e}")
 
     # ================= 處理 PTT 網址 =================
-    ptt_pattern = r'https?://(?:www\.)?ptt\.cc/bbs/[^/]+/[A-Za-z0-9\._]+\.html'
-    ptt_match = re.search(ptt_pattern, message.content)
-    # 原生 PTT 網址命中時
+    ptt_match = re.search(PTT_PATTERN, message.content)
     if ptt_match:
         raw_ptt_url = ptt_match.group(0)
         await process_ptt_embed(
             target_ptt_url=raw_ptt_url,
             display_url=raw_ptt_url,
             message=message,
-            source_name="PTT"
+            source_name="PTT",
+            pending_suppress_ids=pending_suppress_ids
         )
 
-    # ================= PTTWeb 網址處理 =================
-    pttweb_pattern = r'https?://(?:www\.)?pttweb\.cc/(?:bbs/([^/]+)/([A-Za-z0-9\._]+)|s/([^/]+)/([A-Za-z0-9]+))'
-    pttweb_match = re.search(pttweb_pattern, message.content)
-
+    # ================= 處理 PTTWeb 網址 =================
+    pttweb_match = re.search(PTTWEB_PATTERN, message.content)
     if pttweb_match:
         raw_pttweb_url = pttweb_match.group(0)
-        target_ptt_url = None
-
-        # 情況 A：標準網址 /bbs/{看板}/{文章ID}
-        if pttweb_match.group(1) and pttweb_match.group(2):
-            board = pttweb_match.group(1)
-            article_id = pttweb_match.group(2)
-            # 若末端已有 .html 則不重複補
-            if not article_id.endswith('.html'):
-                article_id += '.html'
-            target_ptt_url = f"https://www.ptt.cc/bbs/{board}/{article_id}"
-
-        # 情況 B：短網址 /s/{看板}/{短代碼}
-        elif pttweb_match.group(3) and pttweb_match.group(4):
-            try:
-                # 向短網址發送請求，從其頁面內撈出真正的 ptt.cc 文章網址
-                s_headers = {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-                }
-                s_res = requests.get(raw_pttweb_url, headers=s_headers, timeout=5)
-                if s_res.status_code == 200:
-                    # 搜尋頁面中的 ptt.cc 文章連結
-                    real_ptt_match = re.search(r'https?://www\.ptt\.cc/bbs/[^/]+/[A-Za-z0-9\._]+\.html',
-                                               s_res.text)
-                    if real_ptt_match:
-                        target_ptt_url = real_ptt_match.group(0)
-            except Exception as e:
-                print(f"解析 PTTWeb 短網址時發生錯誤: {e}")
-
-        # 若成功得到官方 target_ptt_url，交給共用函式解析；display_url 帶入使用者的原始 pttweb 連結
-        if target_ptt_url:
-            await process_ptt_embed(
-                target_ptt_url=target_ptt_url,
-                display_url=raw_pttweb_url,
-                message=message,
-                source_name="PTTWeb"
-            )
+        await handle_pttweb_url(raw_pttweb_url, pttweb_match, message, pending_suppress_ids)
 
     # ================= 處理巴哈姆特網址 (GNN / 哈啦版 / 小屋) =================
     baha_match = re.search(BAHA_PATTERN, message.content)
