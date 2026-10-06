@@ -23,6 +23,7 @@ from services.twitter_x import process_x_embed
 from services.instagram import process_instagram_embed
 from services.threads import process_threads_embed
 from services.facebook import process_facebook_embed
+from services.bilibili import process_bilibili_embed
 
 # 自動讀取本地 .env 檔案中的環境變數
 # 若在 Railway 線上運行，Railway 會直接提供環境變數，此函式會自動略過而不報錯
@@ -259,29 +260,11 @@ async def on_message(message):
             print(f"解析網址時發生錯誤: {e}")
 
     # ================= 處理 Bilibili 網址 =================
-    # 確保訊息中包含 bilibili 或 b23，且不是已經轉換過的 vx 連結
     if re.search(BILIBILI_PATTERN, message.content) and not re.search(r"vx(bilibili|b23)", message.content):
         bili_match = re.search(BILIBILI_PATTERN, message.content)
         if bili_match:
             raw_bili_url = bili_match.group(0)
-
-            # 根據網域精準替換
-            if "b23.tv" in raw_bili_url:
-                fix_url = raw_bili_url.replace("b23.tv", "vxb23.tv")
-            else:
-                fix_url = raw_bili_url.replace("bilibili.com", "vxbilibili.com")
-
-            # 發送隱形字元加換行，讓 Discord 讀取網址產生卡片，但畫面上方不會有明顯網址
-            await message.channel.send(f"[⠀]({fix_url})")
-
-            # 登記這則訊息，交給 on_message_edit 負責後續補刀
-            pending_suppress_ids.add(message.id)
-
-            # 隱藏使用者發送的原始訊息預覽
-            try:
-                await message.edit(suppress=True)
-            except Exception as e:
-                print(f"無法隱藏原始訊息預覽: {e}")
+            await process_bilibili_embed(raw_bili_url, message, pending_suppress_ids)
 
     # ================= 處理 Facebook 網址 =================
     if re.search(FACEBOOK_PATTERN, message.content) and "facebed.com" not in message.content:
