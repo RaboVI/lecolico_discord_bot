@@ -10,7 +10,6 @@ from yt_dlp import YoutubeDL
 from cachetools import TTLCache
 
 # ================= 參數與伺服器設定 =================
-WATCHDOG_CHECK_DELAY = 8.0
 CUSTOM_WORKER_DOMAIN = "zusakvi.cc"
 
 fb_cache = TTLCache(maxsize=150, ttl=3600)
@@ -61,12 +60,7 @@ def _resolve_fb_url_sync(raw_fb_url: str) -> str:
 
 
 def _extract_fb_post_sync(target_fb_url: str) -> dict | None:
-    """
-    爬取普通貼文（個人貼文、社團貼文、轉發貼文）：
-    1. 智能識別社團名 / 作者
-    2. 穿透轉發提取被轉發原文案 (50 字限制)
-    3. 解除斜線隱蔽，精準狙擊 __isMedia: Photo 的真實相片 ID (最多 3 張)
-    """
+    """爬取普通貼文（個人貼文、社團貼文、轉發貼文）"""
     try:
         clean_url = target_fb_url.split('?')[0]
         mobile_url = re.sub(r'https?://(?:www\.)?facebook\.com', 'https://m.facebook.com', clean_url)
@@ -83,7 +77,6 @@ def _extract_fb_post_sync(target_fb_url: str) -> dict | None:
             return None
 
         html_text = res.text
-        # 解除 Facebook 對網址與 JSON 斜線的跳脫偽裝
         unescaped_html = html_text.replace(r'\/', '/').replace('\\/', '/')
         soup = BeautifulSoup(html_text, 'html.parser')
 
@@ -123,9 +116,7 @@ def _extract_fb_post_sync(target_fb_url: str) -> dict | None:
         # 2. 內文萃取
         main_story = soup.find('div', id='m_story_permalink_view') or soup.find('div', role='main') or soup
 
-        # 移除留言區
-        for comment_elem in main_story.find_all(['div', 'footer', 'section'],
-                                                class_=re.compile(r'ufi|comment|feedback', re.I)):
+        for comment_elem in main_story.find_all(['div', 'footer', 'section'], class_=re.compile(r'ufi|comment|feedback', re.I)):
             comment_elem.decompose()
 
         raw_desc = ""
@@ -145,25 +136,21 @@ def _extract_fb_post_sync(target_fb_url: str) -> dict | None:
         if len(compact_desc) > 50:
             compact_desc = compact_desc[:50] + "..."
 
-        # 3. 圖片提取（核心狙擊：鎖定 __isMedia: Photo 真實相片）
+        # 3. 圖片提取（鎖定 __isMedia: Photo）
         image_urls = []
         found_photo_ids = []
 
-        # (A) 優先在解除斜線後的內容中，抓取所有明確被標記為 Photo 的 ID
-        # 格式範例："id":"27978767405134914","__isMedia":"Photo"
         media_photo_matches = re.findall(r'"id":"(\d{14,18})","__isMedia":"Photo"', unescaped_html)
         for pid in media_photo_matches:
             if pid not in found_photo_ids:
                 found_photo_ids.append(pid)
 
-        # (B) 備用：比對帶有 /photo/?fbid= 或 photo.php?fbid= 的超連結
         if len(found_photo_ids) < 3:
             link_matches = re.findall(r'(?:/photo/?\?fbid=|photo\.php\?fbid=)(\d{14,18})', unescaped_html)
             for pid in link_matches:
                 if pid not in found_photo_ids:
                     found_photo_ids.append(pid)
 
-        # 將找到的相片 ID 轉換為 lookaside 官方跳轉網址
         if found_photo_ids:
             for pid in found_photo_ids:
                 lookaside_url = f"https://lookaside.fbsbx.com/lookaside/crawler/media/?media_id={pid}"
@@ -172,21 +159,17 @@ def _extract_fb_post_sync(target_fb_url: str) -> dict | None:
                 if len(image_urls) >= 3:
                     break
 
-        # (C) 備用防線：若完全無 ID，抓取包含 -6/ 的貼文真實 CDN
         if len(image_urls) < 3:
-            raw_cdn_matches = re.findall(r'(https:[^"\'\s<>\\]+?fbcdn\.net/[^"\'\s<>\\]+?-[68]/[^"\'\s<>\\]+)',
-                                         unescaped_html)
+            raw_cdn_matches = re.findall(r'(https:[^"\'\s<>\\]+?fbcdn\.net/[^"\'\s<>\\]+?-[68]/[^"\'\s<>\\]+)', unescaped_html)
             for raw_img in raw_cdn_matches:
                 clean_img = raw_img.replace('&amp;', '&')
-                if any(k in clean_img for k in
-                       ["s32x32", "s100x100", "p50x50", "p100x100", "emoji", "static", "rsrc.php"]):
+                if any(k in clean_img for k in ["s32x32", "s100x100", "p50x50", "p100x100", "emoji", "static", "rsrc.php"]):
                     continue
                 if clean_img not in image_urls:
                     image_urls.append(clean_img)
                 if len(image_urls) >= 3:
                     break
 
-        # (D) 兜底：非社團貼文且完全無圖時，才允許退回使用 og:image
         if not image_urls and not is_group_post:
             og_img = soup.find('meta', property='og:image')
             if og_img and og_img.get('content'):
@@ -205,23 +188,42 @@ def _extract_fb_post_sync(target_fb_url: str) -> dict | None:
 
 
 def _download_fb_video_ytdlp(fb_url: str) -> dict | None:
-    """yt-dlp 備援下載（年齡限制/私密影片兜底）"""
+    """yt-dlp 下載模組 (含社團 permalink 自動探測)"""
     temp_dir = tempfile.gettempdir()
     out_template = os.path.join(temp_dir, 'fb_%(id)s.%(ext)s')
 
-    id_match = re.search(r'/(?:reel|videos)/(\d+)', fb_url)
-    reel_id = id_match.group(1) if id_match else None
+    target_urls = []
 
-    target_urls = [fb_url]
-    if reel_id:
-        target_urls.append(f"https://www.facebook.com/watch/?v={reel_id}")
+    id_match = re.search(r'/(?:reel|videos)/(\d+)', fb_url)
+    if id_match:
+        target_urls.append(f"https://www.facebook.com/watch/?v={id_match.group(1)}")
+        target_urls.append(f"https://www.facebook.com/reel/{id_match.group(1)}")
+
+    if "/groups/" in fb_url:
+        try:
+            m_url = re.sub(r'https?://(?:www\.)?facebook\.com', 'https://m.facebook.com', fb_url.split('?')[0])
+            res = requests.get(m_url, headers=REQUEST_HEADERS, impersonate="chrome120", timeout=8)
+            if res.status_code == 200:
+                unescaped = res.text.replace(r'\/', '/')
+                v_ids = re.findall(r'(?:video_id["\':=]|"video":\{"id":")(\d{12,18})', unescaped)
+                if not v_ids:
+                    v_ids = re.findall(r'"playable_url".*?"id":"(\d{12,18})"', unescaped)
+                for vid in v_ids:
+                    watch_candidate = f"https://www.facebook.com/watch/?v={vid}"
+                    if watch_candidate not in target_urls:
+                        target_urls.append(watch_candidate)
+        except Exception as e:
+            print(f"[Rescue yt-dlp] 探測社團影片 ID 失敗: {e}")
+
+    if fb_url not in target_urls:
+        target_urls.append(fb_url)
 
     ydl_opts = {
         'format': 'best[ext=mp4]/best',
         'outtmpl': out_template,
         'quiet': True,
         'no_warnings': True,
-        'max_filesize': 24 * 1024 * 1024,
+        'max_filesize': 50 * 1024 * 1024,
         'http_headers': {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
             'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7',
@@ -244,7 +246,7 @@ def _download_fb_video_ytdlp(fb_url: str) -> dict | None:
                 if os.path.exists(filename):
                     return {
                         'file_path': filename,
-                        'title': info.get('title') or "Facebook 限制級內容"
+                        'title': info.get('title') or "Facebook 影片"
                     }
         except Exception:
             continue
@@ -252,62 +254,181 @@ def _download_fb_video_ytdlp(fb_url: str) -> dict | None:
     return None
 
 
-async def _watchdog_worker_embed(fix_msg: discord.Message, target_fb_url: str, raw_fb_url: str):
-    """背景看門狗：若 Worker 逾時未讓 Discord 生成卡片，自動啟動 yt-dlp 救援"""
-    await asyncio.sleep(WATCHDOG_CHECK_DELAY)
+async def _watchdog_worker_embed(fix_msg: discord.Message, target_fb_url: str, raw_fb_url: str, fix_fb_url: str):
+    """
+    非同步看門狗：
+    結合 Worker 診斷標頭與動態檔案上限檢測
+    """
+    print(f"\n[Watchdog] 🐕 看門狗啟動，監聽訊息 ID: {fix_msg.id}")
+    channel = fix_msg.channel
+
+    # 1. 探測 Worker 診斷狀態（辨識是 FB 擋 IP 還是抓取未命中）
+    try:
+        diag_res = await asyncio.to_thread(
+            requests.get,
+            fix_fb_url,
+            headers={'User-Agent': 'Discordbot/2.0'},
+            allow_redirects=False,
+            timeout=5
+        )
+        fb_status = diag_res.headers.get("X-FB-Status", "未知")
+        fb_blocked = diag_res.headers.get("X-FB-Blocked", "未知")
+        video_found = diag_res.headers.get("X-Video-Found", "未知")
+        print(f"[Watchdog Diag] 🌐 Worker 診斷: FB狀態={fb_status}, 是否被擋={fb_blocked}, 命中影片={video_found}")
+    except Exception as diag_err:
+        print(f"[Watchdog Diag] ⚠️ 探測 Worker 診斷失敗: {diag_err}")
+
+    # 初審等待
+    await asyncio.sleep(9.0)
 
     try:
-        channel = fix_msg.channel
         refreshed_msg = await channel.fetch_message(fix_msg.id)
+    except discord.NotFound:
+        return
+    except Exception:
+        refreshed_msg = None
 
-        if refreshed_msg.embeds:
+    has_video_tag = False
+    is_fake_video = False
+
+    if refreshed_msg and refreshed_msg.embeds:
+        for idx, emb in enumerate(refreshed_msg.embeds):
+            v_url = emb.video.url if emb.video else ""
+            if emb.video and v_url:
+                if "lookaside.fbsbx.com" in v_url or "media/?media_id=" in v_url:
+                    is_fake_video = True
+                    break
+                has_video_tag = True
+                break
+
+    if is_fake_video or not has_video_tag:
+        print("[Watchdog] ⚠️ 初審未通過，進入救援流程！")
+        await _trigger_ytdlp_rescue(fix_msg, target_fb_url, raw_fb_url)
+        return
+
+    # 複審等待
+    await asyncio.sleep(9.0)
+
+    try:
+        refreshed_msg = await channel.fetch_message(fix_msg.id)
+        if not refreshed_msg:
+            return
+
+        is_still_valid = False
+        for emb in refreshed_msg.embeds:
+            v_url = emb.video.url if emb.video else ""
+            if emb.video and v_url and emb.video.proxy_url:
+                if "lookaside.fbsbx.com" not in v_url:
+                    is_still_valid = True
+                    break
+
+        if is_still_valid:
+            print("[Watchdog] ✅ 複審確認影片正常播放，看門狗完成任務！")
             fb_cache[raw_fb_url] = {"type": "worker"}
             return
 
+        print("[Watchdog] ⚠️ 複審判定播放器破圖失效，啟動救援機制！")
+        await _trigger_ytdlp_rescue(fix_msg, target_fb_url, raw_fb_url)
+
+    except discord.NotFound:
+        pass
+    except Exception as e:
+        print(f"[Watchdog] ❌ 階段二例外: {e}")
+
+
+async def _trigger_ytdlp_rescue(fix_msg: discord.Message, target_fb_url: str, raw_fb_url: str):
+    """
+    執行 yt-dlp 救援並嚴格防護 413 錯誤（動態伺服器上限偵測）
+    """
+    print(f"\n[Rescue] 🚨 進入救援流程！目標: {target_fb_url}")
+    channel = fix_msg.channel
+    guild = fix_msg.guild
+
+    # 動態計算該伺服器的精準上傳上限（預留 512KB 安全緩衝）
+    server_limit = getattr(guild, "filesize_limit", 25 * 1024 * 1024) if guild else 25 * 1024 * 1024
+    safe_upload_limit = min(server_limit - (512 * 1024), 24 * 1024 * 1024)  # 保守限制在 24MB 內避免 413
+
+    try:
+        await fix_msg.delete()
+    except Exception:
+        pass
+
+    try:
+        status_msg = await channel.send("⏳ **影片容量較大或解析受限**，正在為您直接擷取原始檔案，請稍候...")
+    except Exception:
+        status_msg = None
+
+    ytdl_result = await asyncio.to_thread(_download_fb_video_ytdlp, target_fb_url)
+
+    if ytdl_result and ytdl_result.get('file_path') and os.path.exists(ytdl_result['file_path']):
+        file_path = ytdl_result['file_path']
+        file_size = os.path.getsize(file_path)
+        print(f"[Rescue] 下載完成，體積: {file_size} bytes (伺服器安全上限: {safe_upload_limit} bytes)")
+
+        # 關鍵防線：體積超出時直接攔截，絕不硬傳引發 413
+        if file_size > safe_upload_limit:
+            print(f"[Rescue] ⚠️ 檔案體積超出伺服器可上傳上限 ({file_size} > {safe_upload_limit})，轉為引導卡片")
+            if os.path.exists(file_path):
+                os.remove(file_path)
+
+            embed = discord.Embed(
+                title="📦 影片檔案超出 Discord 上傳上限",
+                description=f"此影片檔案大小為 **{round(file_size / (1024*1024), 2)} MB**，已超出此伺服器的檔案限制。\n請直接前往觀看：\n[點此開啟 Facebook 原片]({target_fb_url})",
+                color=0x1877F2
+            )
+            if status_msg:
+                await status_msg.edit(content=None, embed=embed)
+            else:
+                await channel.send(embed=embed)
+            return
+
         try:
-            await refreshed_msg.delete()
-        except Exception:
-            pass
+            video_title = ytdl_result.get('title', 'Facebook 影片')
+            discord_file = discord.File(file_path, filename="facebook_video.mp4")
+            await channel.send(
+                content=f"**{video_title}**",
+                file=discord_file
+            )
+            print("[Rescue] ✅ 影片檔案上傳成功！")
 
-        status_msg = await channel.send("⏳ **偵測到預覽生成逾時或受限**，正在為您直接擷取檔案，請稍候...")
-
-        ytdl_result = await asyncio.to_thread(_download_fb_video_ytdlp, target_fb_url)
-
-        if ytdl_result and ytdl_result.get('file_path') and os.path.exists(ytdl_result['file_path']):
-            file_path = ytdl_result['file_path']
-            try:
-                discord_file = discord.File(file_path, filename="facebook_reel.mp4")
-                await channel.send(
-                    content="已為您直接擷取影片檔案：",
-                    file=discord_file
-                )
+            if status_msg:
                 try:
                     await status_msg.delete()
                 except Exception:
                     pass
-                fb_cache[raw_fb_url] = {"type": "downloaded"}
-            finally:
-                if os.path.exists(file_path):
-                    os.remove(file_path)
+            fb_cache[raw_fb_url] = {"type": "downloaded"}
             return
+        except discord.HTTPException as http_err:
+            print(f"[Rescue] ❌ 上傳檔案遇到 HTTP 例外 (包含 413): {http_err}")
+            # 遭遇 413 時立即編輯提示訊息，消除使用者無限乾等
+            embed = discord.Embed(
+                title="📦 影片超出伺服器負載上限",
+                description=f"Discord 拒絕接收此檔案 (HTTP 413)，請直接至原網址觀看：\n[點此開啟 Facebook 原片]({target_fb_url})",
+                color=0x1877F2
+            )
+            if status_msg:
+                await status_msg.edit(content=None, embed=embed)
+            else:
+                await channel.send(embed=embed)
+            return
+        finally:
+            if os.path.exists(file_path):
+                os.remove(file_path)
 
-        embed = discord.Embed(
-            title="🔒 此 Facebook 內容含有年齡限制或私密設定",
-            description=f"無法獲取公開媒體，請直接點擊連結查看：\n[前往 Facebook 觀看]({target_fb_url})",
-            color=0x1877F2
-        )
+    # 下載失敗時的保底卡片
+    embed = discord.Embed(
+        title="🔒 此 Facebook 內容受限或無法取得公開媒體",
+        description=f"請直接點擊原連結前往觀看：\n[前往 Facebook 觀看]({target_fb_url})",
+        color=0x1877F2
+    )
+    if status_msg:
         await status_msg.edit(content=None, embed=embed)
-
-    except discord.NotFound:
-        pass
-    except Exception:
-        pass
+    else:
+        await channel.send(embed=embed)
 
 
 async def process_facebook_embed(raw_fb_url: str, message: discord.Message, pending_suppress_ids: set):
-    """
-    Facebook 預覽主入口
-    """
+    """Facebook 預覽主入口"""
     pending_suppress_ids.add(message.id)
     try:
         await message.edit(suppress=True)
@@ -316,13 +437,12 @@ async def process_facebook_embed(raw_fb_url: str, message: discord.Message, pend
 
     target_fb_url = await asyncio.to_thread(_resolve_fb_url_sync, raw_fb_url)
 
-    is_video_content = any(k in target_fb_url for k in ["/reel/", "/videos/", "/watch"]) or \
-                       any(k in raw_fb_url for k in ["/share/r/", "/share/v/"])
+    is_video_content = any(k in target_fb_url.lower() for k in ["/reel/", "/videos/", "/watch"]) or \
+                       any(k in raw_fb_url.lower() for k in ["/share/r/", "/share/v/"])
 
     if not is_video_content:
         post_data = await asyncio.to_thread(_extract_fb_post_sync, target_fb_url)
-
-        if post_data:
+        if post_data and len(post_data.get("images", [])) > 0:
             embeds = []
             main_embed = discord.Embed(
                 title=post_data["title"],
@@ -330,25 +450,24 @@ async def process_facebook_embed(raw_fb_url: str, message: discord.Message, pend
                 description=post_data["description"] if post_data["description"] else None,
                 color=0x1877F2
             )
-            if post_data.get("images"):
-                main_embed.set_image(url=post_data["images"][0])
+            main_embed.set_image(url=post_data["images"][0])
             embeds.append(main_embed)
 
-            if post_data.get("images") and len(post_data["images"]) > 1:
+            if len(post_data["images"]) > 1:
                 for extra_img in post_data["images"][1:3]:
                     extra_embed = discord.Embed(url=target_fb_url)
                     extra_embed.set_image(url=extra_img)
                     embeds.append(extra_embed)
 
             await message.channel.send(embeds=embeds)
-        return
+            return
 
-    fix_fb_url = re.sub(r"(https?://)(?:www\.)?(?:facebook\.com|fb\.watch)", rf"\1{CUSTOM_WORKER_DOMAIN}",
-                        target_fb_url)
+    fix_fb_url = re.sub(r"(https?://)(?:www\.)?(?:facebook\.com|fb\.watch)", rf"\1{CUSTOM_WORKER_DOMAIN}", target_fb_url)
 
     try:
-        fix_msg = await message.channel.send(f"[⠀]({fix_fb_url})")
-    except Exception:
+        fix_msg = await message.channel.send(f"[\u2800]({fix_fb_url})")
+    except Exception as e:
+        print(f"❌ 發送代理訊息失敗: {e}")
         return
 
-    asyncio.create_task(_watchdog_worker_embed(fix_msg, target_fb_url, raw_fb_url))
+    asyncio.create_task(_watchdog_worker_embed(fix_msg, target_fb_url, raw_fb_url, fix_fb_url))
