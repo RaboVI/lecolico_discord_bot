@@ -5,8 +5,8 @@
  ### 「社群媒體」
 1. X/推特 (fixup & fixvx)
 2. Instagram (oginstagram & kkinstagram & hhinstagram)
-3. Facebook (facebed)
-4. Threads (fixthreads.seria.moe)
+3. Facebook 
+4. Threads (fixthreads.seria.moe & fzthreads)
  ### 「影音平台」
 1. BiliBili (vxbilibili.com & vxb23.tv)
  ### 「一般網站」

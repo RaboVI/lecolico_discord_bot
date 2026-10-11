@@ -84,9 +84,8 @@ async def on_message(message):
             await process_bilibili_embed(bili_match.group(0), message, pending_suppress_ids)
 
     # ================= 處理 Facebook 網址 =================
-    if "facebed.com" not in message.content:
-        if fb_match := re.search(FACEBOOK_PATTERN, message.content):
-            await process_facebook_embed(fb_match.group(0), message, pending_suppress_ids)
+    if fb_match := re.search(FACEBOOK_PATTERN, message.content):
+        await process_facebook_embed(fb_match.group(0), message, pending_suppress_ids)
 
     # ================= 處理 Threads 網址 =================
     if not re.search(r"(fzthreads\.com|fixthreads\.seria\.moe)", message.content):

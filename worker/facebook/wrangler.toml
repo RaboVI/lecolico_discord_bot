@@ -1,0 +1,13 @@
+name = "lecolico"
+main = "worker.js"
+compatibility_date = "2026-10-08"
+workers_dev = false
+
+# 自訂網域 (需與 services/facebook.py 的 CUSTOM_WORKER_DOMAIN 一致)
+routes = [
+  { pattern = "zusakvi.cc", custom_domain = true }
+]
+
+# 保持後台已啟用的 Workers 日誌
+[observability]
+enabled = true
