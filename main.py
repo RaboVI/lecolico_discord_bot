@@ -93,7 +93,7 @@ async def on_message(message):
             await process_threads_embed(threads_match.group(0), message, pending_suppress_ids)
 
     # ================= 處理 Instagram 網址 =================
-    if not re.search(r"(og|hh|kk)instagram\.com", message.content):
+    if not re.search(r"(og|hh)instagram\.com", message.content):
         if ig_match := re.search(INSTAGRAM_PATTERN, message.content):
             await process_instagram_embed(ig_match.group(0), message, pending_suppress_ids)
 

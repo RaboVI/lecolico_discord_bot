@@ -5,8 +5,7 @@ import discord
 # 預設可用之 Instagram 代理網域清單 (隨機負載平衡，降低單一伺服器被封鎖或失效機率)
 DEFAULT_IG_PROXIES = [
     "oginstagram.com",
-    "hhinstagram.com",
-    "kkinstagram.com"
+    "hhinstagram.com"
 ]
 
 
