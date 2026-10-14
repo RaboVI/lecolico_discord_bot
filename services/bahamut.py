@@ -98,7 +98,7 @@ def _parse_gnn(soup: BeautifulSoup, target_url: str) -> dict:
 
 def _parse_forum(soup: BeautifulSoup, target_url: str) -> dict | None:
     """哈啦板解析邏輯（首樓鎖定、看板名稱、不空行排版、多圖、YouTube 分離）"""
-    first_post = soup.find('section', class_='c-section')
+    first_post = soup.find('section', class_='c-section', id=re.compile(r'^post_'))
     if not first_post:
         return None
 
