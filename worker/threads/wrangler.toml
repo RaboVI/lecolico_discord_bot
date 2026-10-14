@@ -1,0 +1,8 @@
+name = "lecolico-threads"
+main = "worker.js"
+compatibility_date = "2026-10-08"
+
+# 綁定自訂子網域 threads.zusakvi.cc
+routes = [
+  { pattern = "threads.zusakvi.cc", custom_domain = true }
+]

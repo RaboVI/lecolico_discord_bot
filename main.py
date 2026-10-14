@@ -88,9 +88,9 @@ async def on_message(message):
         await process_facebook_embed(fb_match.group(0), message, pending_suppress_ids)
 
     # ================= 處理 Threads 網址 =================
-    if not re.search(r"(fzthreads\.com|fixthreads\.seria\.moe)", message.content):
-        if threads_match := re.search(THREADS_PATTERN, message.content):
-            await process_threads_embed(threads_match.group(0), message, pending_suppress_ids)
+    elif (threads_match := re.search(THREADS_PATTERN, message.content)) and not re.search(
+            r"(fzthreads\.com|fixthreads\.seria\.moe|threads\.zusakvi\.cc)", message.content):
+        await process_threads_embed(threads_match.group(0), message, pending_suppress_ids)
 
     # ================= 處理 Instagram 網址 =================
     if not re.search(r"(og|hh)instagram\.com", message.content):
