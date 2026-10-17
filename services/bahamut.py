@@ -1,4 +1,5 @@
 import os
+import io
 import re
 import asyncio
 import urllib.parse
@@ -35,12 +36,37 @@ class BahaSessionManager:
 # 建立模組內全域 Session
 baha_client = BahaSessionManager()
 
+# 圖片下載上限（Discord 附件限制內，留安全空間）
+MAX_IMAGE_BYTES = 8 * 1024 * 1024
+IMAGE_EXTS = {'image/jpeg': 'jpg', 'image/png': 'png', 'image/gif': 'gif', 'image/webp': 'webp'}
+
+
+def _download_image_sync(img_url: str, referer: str) -> tuple[bytes, str] | None:
+    """由 Bot 自己下載圖片，避免 Discord 伺服器抓巴哈圖片失敗導致卡片沒圖"""
+    try:
+        headers = dict(REQUEST_HEADERS)
+        headers['Referer'] = referer
+        res = requests.get(img_url, headers=headers, timeout=10)
+        content_type = res.headers.get('Content-Type', '').split(';')[0].strip().lower()
+        if res.status_code != 200 or content_type not in IMAGE_EXTS:
+            print(f"[Bahamut] 圖片下載失敗 ({res.status_code}, {content_type}): {img_url}")
+            return None
+        if len(res.content) > MAX_IMAGE_BYTES:
+            print(f"[Bahamut] 圖片過大，改用原網址: {img_url}")
+            return None
+        return res.content, IMAGE_EXTS[content_type]
+    except Exception as e:
+        print(f"[Bahamut] 圖片下載錯誤: {img_url} ({e})")
+        return None
+
 
 def _filter_and_extract_images(soup_or_div) -> list[str]:
     """通用圖片過濾器：支援 data-src 懶加載，嚴格排除表情符號、佔位圖與編輯器貼圖"""
     img_urls = []
     for img in soup_or_div.find_all('img'):
         src = img.get('data-src') or img.get('src') or ""
+        if src.startswith('//'):
+            src = 'https:' + src
         class_name = " ".join(img.get('class', [])).lower()
 
         # 排除表情貼圖、內建 emoji 與 1x1 佔位圖
@@ -274,12 +300,17 @@ def _fetch_bahamut_data_sync(raw_url: str) -> dict | None:
         soup = BeautifulSoup(res.text, 'html.parser')
 
         # 路由分流
+        data = None
         if "gnn.gamer.com.tw" in url:
-            return _parse_gnn(soup, url)
+            data = _parse_gnn(soup, url)
         elif "forum.gamer.com.tw" in url:
-            return _parse_forum(soup, url)
+            data = _parse_forum(soup, url)
         elif "home.gamer.com.tw" in url:
-            return _parse_home(soup, url)
+            data = _parse_home(soup, url)
+
+        if data and not data.get("is_private"):
+            print(f"[Bahamut] 解析完成，找到 {len(data.get('preview_images', []))} 張圖片: {url}")
+        return data
 
     except Exception as e:
         print(f"[Bahamut] 解析巴哈姆特網址時發生錯誤: {e}")
@@ -325,23 +356,38 @@ async def process_bahamut_embed(raw_url: str, message: discord.Message, pending_
         footer_text += f" • {data['date_str']}"
     main_embed.set_footer(text=footer_text)
 
-    # 主圖
+    # 先由 Bot 下載圖片並以附件上傳；下載失敗的才退回直接給 Discord 圖片網址
     preview_images = data.get("preview_images", [])
-    if preview_images:
-        main_embed.set_image(url=preview_images[0])
+    downloaded = await asyncio.gather(
+        *(asyncio.to_thread(_download_image_sync, u, data["url"]) for u in preview_images)
+    )
+    files = []
+    image_refs = []
+    for i, (img_url, result) in enumerate(zip(preview_images, downloaded)):
+        if result:
+            content, ext = result
+            filename = f"bahamut_{i}.{ext}"
+            files.append(discord.File(io.BytesIO(content), filename=filename))
+            image_refs.append(f"attachment://{filename}")
+        else:
+            image_refs.append(img_url)
+
+    # 主圖
+    if image_refs:
+        main_embed.set_image(url=image_refs[0])
     embeds.append(main_embed)
 
     # 附屬圖片 Embed (達成 2~3 張圖並排)
-    for img_url in preview_images[1:]:
+    for img_ref in image_refs[1:]:
         sub_embed = discord.Embed(url=data["url"])
-        sub_embed.set_image(url=img_url)
+        sub_embed.set_image(url=img_ref)
         embeds.append(sub_embed)
 
     # 3. 發送訊息 (哈啦板若有 YT 先獨立發送)
     if data.get("first_yt"):
         await message.channel.send(content=data["first_yt"])
 
-    await message.channel.send(embeds=embeds)
+    await message.channel.send(embeds=embeds, files=files)
 
     # 4. 登記訊息並壓抑原始預覽
     pending_suppress_ids.add(message.id)
