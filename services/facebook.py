@@ -380,35 +380,51 @@ async def _trigger_fallback_card(channel: discord.abc.Messageable, original_url:
     await channel.send(embed=embed)
 
 
+# 看門狗等待設定：第一次產生預覽時 Discord 要讀兩次 Worker，常常超過 8 秒
+WATCHDOG_POLL_INTERVAL = 2.0   # 每隔幾秒檢查一次
+WATCHDOG_FIRST_WAIT = 20.0     # 初審最多等幾秒
+WATCHDOG_SECOND_WAIT = 8.0     # 初審通過後再等幾秒做複審
+
+
+def _find_valid_video(msg: discord.Message | None, require_proxy: bool = False) -> str:
+    """檢查訊息的 Embed 影片狀態：回傳 "ok"、"fake"（假影片）或 "none"（還沒有影片）"""
+    if not msg or not msg.embeds:
+        return "none"
+    for emb in msg.embeds:
+        v_url = emb.video.url if emb.video else ""
+        if emb.video and v_url:
+            if "lookaside.fbsbx.com" in v_url or "media/?media_id=" in v_url:
+                return "fake"
+            if require_proxy and not emb.video.proxy_url:
+                continue
+            return "ok"
+    return "none"
+
+
 async def _watchdog_worker_embed(fix_msg: discord.Message, target_fb_url: str, raw_fb_url: str, fix_fb_url: str):
     """非同步看門狗：專門監控 Worker 原生影片播放器生成狀況"""
     print(f"\n[Watchdog] 🐕 看門狗啟動，監聽訊息 ID: {fix_msg.id}")
     channel = fix_msg.channel
 
-    await asyncio.sleep(8.0)
+    # 階段一：每 2 秒檢查一次，最多等 20 秒，影片一出現就提早通過
+    status = "none"
+    waited = 0.0
+    while waited < WATCHDOG_FIRST_WAIT:
+        await asyncio.sleep(WATCHDOG_POLL_INTERVAL)
+        waited += WATCHDOG_POLL_INTERVAL
+        try:
+            refreshed_msg = await channel.fetch_message(fix_msg.id)
+        except discord.NotFound:
+            return
+        except Exception:
+            refreshed_msg = None
 
-    try:
-        refreshed_msg = await channel.fetch_message(fix_msg.id)
-    except discord.NotFound:
-        return
-    except Exception:
-        refreshed_msg = None
+        status = _find_valid_video(refreshed_msg)
+        if status != "none":
+            break
 
-    has_video_tag = False
-    is_fake_video = False
-
-    if refreshed_msg and refreshed_msg.embeds:
-        for emb in refreshed_msg.embeds:
-            v_url = emb.video.url if emb.video else ""
-            if emb.video and v_url:
-                if "lookaside.fbsbx.com" in v_url or "media/?media_id=" in v_url:
-                    is_fake_video = True
-                    break
-                has_video_tag = True
-                break
-
-    if is_fake_video or not has_video_tag:
-        print("[Watchdog] ⚠️ 初審未通過，刪除代理訊息並輸出防呆卡片！")
+    if status != "ok":
+        print(f"[Watchdog] ⚠️ 初審未通過（等待 {waited:.0f} 秒，狀態: {status}），刪除代理訊息並輸出防呆卡片！")
         try:
             await fix_msg.delete()
         except Exception:
@@ -416,22 +432,15 @@ async def _watchdog_worker_embed(fix_msg: discord.Message, target_fb_url: str, r
         await _trigger_fallback_card(channel, target_fb_url)
         return
 
-    await asyncio.sleep(8.0)
+    print(f"[Watchdog] 🔎 初審通過（等待 {waited:.0f} 秒），進入複審")
+    await asyncio.sleep(WATCHDOG_SECOND_WAIT)
 
     try:
         refreshed_msg = await channel.fetch_message(fix_msg.id)
         if not refreshed_msg:
             return
 
-        is_still_valid = False
-        for emb in refreshed_msg.embeds:
-            v_url = emb.video.url if emb.video else ""
-            if emb.video and v_url and emb.video.proxy_url:
-                if "lookaside.fbsbx.com" not in v_url:
-                    is_still_valid = True
-                    break
-
-        if is_still_valid:
+        if _find_valid_video(refreshed_msg, require_proxy=True) == "ok":
             print("[Watchdog] ✅ 複審確認影片正常播放！")
             fb_cache[raw_fb_url] = {"type": "worker"}
             return
