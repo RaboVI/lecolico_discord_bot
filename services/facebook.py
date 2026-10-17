@@ -458,13 +458,45 @@ async def _watchdog_worker_embed(fix_msg: discord.Message, target_fb_url: str, r
         print(f"[Watchdog] ❌ 階段二例外: {e}")
 
 
+def _cookies_text_to_netscape(raw: str) -> str:
+    """
+    把環境變數裡的 cookies 文字轉成 yt-dlp 讀得懂的 Netscape 格式，支援兩種貼法：
+    1. 整份 fb_cookies.txt 內容（Railway 若把換行存成字面 \\n、或 Tab 變成空白也能還原）
+    2. 瀏覽器 Cookie 標頭格式：c_user=123; xs=abc; datr=...
+    """
+    text = raw.strip().replace('\\n', '\n').replace('\r', '')
+    expires = int(time.time()) + 365 * 24 * 3600
+    lines = ["# Netscape HTTP Cookie File"]
+
+    for line in text.split('\n'):
+        line = line.strip()
+        # 匯出工具會把 HttpOnly 的 cookie（例如 xs）寫成 #HttpOnly_.facebook.com，不能當註解跳過
+        if not line or (line.startswith('#') and not line.startswith('#HttpOnly_')):
+            continue
+        fields = line.split('\t') if '\t' in line else line.split()
+        if len(fields) == 7:
+            lines.append('\t'.join(fields))
+
+    if len(lines) == 1:
+        for pair in text.replace('\n', ';').split(';'):
+            if '=' not in pair:
+                continue
+            name, value = pair.split('=', 1)
+            name, value = name.strip(), value.strip()
+            if name and value:
+                lines.append(f".facebook.com\tTRUE\t/\tTRUE\t{expires}\t{name}\t{value}")
+
+    return '\n'.join(lines) + '\n'
+
+
 def _prepare_fb_cookie_file() -> tuple[str | None, str]:
     """
     準備給 yt-dlp 用的「暫存」cookies 檔，回傳 (路徑, 來源說明)
     yt-dlp 結束時會把 cookie jar 寫回 cookiefile，若 FB 回傳登出用的 Set-Cookie 就會把 c_user / xs 洗掉，
     所以一律複製一份暫存檔給它用，原本的 fb_cookies.txt 永遠不會被改寫
     1. 優先使用專案根目錄的 fb_cookies.txt（本地測試）
-    2. 沒有檔案時改用環境變數 FB_C_USER / FB_XS（或 c_user / xs），方便 Railway 部署
+    2. 環境變數 FB_COOKIES_TEXT（Railway：整份 cookies 文字或 c_user=...; xs=... 格式）
+    3. 環境變數 FB_C_USER / FB_XS（或 c_user / xs）
     """
     fd, temp_path = tempfile.mkstemp(prefix='fb_cookies_', suffix='.txt')
     os.close(fd)
@@ -472,6 +504,16 @@ def _prepare_fb_cookie_file() -> tuple[str | None, str]:
     if os.path.exists(FB_COOKIE_PATH):
         shutil.copyfile(FB_COOKIE_PATH, temp_path)
         return temp_path, "fb_cookies.txt"
+
+    cookies_text = os.environ.get("FB_COOKIES_TEXT")
+    if cookies_text and cookies_text.strip():
+        netscape = _cookies_text_to_netscape(cookies_text)
+        names = [l.split('\t')[5] for l in netscape.splitlines()[1:]]
+        if names:
+            with open(temp_path, 'w', encoding='utf-8') as f:
+                f.write(netscape)
+            has_login = "c_user" in names and "xs" in names
+            return temp_path, f"FB_COOKIES_TEXT（{len(names)} 筆，含 c_user/xs: {has_login}）"
 
     c_user = os.environ.get("FB_C_USER") or os.environ.get("c_user")
     xs = os.environ.get("FB_XS") or os.environ.get("xs")
@@ -481,7 +523,7 @@ def _prepare_fb_cookie_file() -> tuple[str | None, str]:
             f.write("# Netscape HTTP Cookie File\n")
             for name, value in (("c_user", c_user.strip()), ("xs", xs.strip())):
                 f.write(f".facebook.com\tTRUE\t/\tTRUE\t{expires}\t{name}\t{value}\n")
-        return temp_path, "環境變數"
+        return temp_path, "環境變數 FB_C_USER / FB_XS"
 
     os.remove(temp_path)
     return None, "無"
