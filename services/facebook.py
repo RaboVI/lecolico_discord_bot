@@ -1,7 +1,9 @@
 import os
 import re
 import asyncio
+import shutil
 import tempfile
+import time
 import urllib.parse
 import discord
 from curl_cffi import requests
@@ -456,6 +458,35 @@ async def _watchdog_worker_embed(fix_msg: discord.Message, target_fb_url: str, r
         print(f"[Watchdog] ❌ 階段二例外: {e}")
 
 
+def _prepare_fb_cookie_file() -> tuple[str | None, str]:
+    """
+    準備給 yt-dlp 用的「暫存」cookies 檔，回傳 (路徑, 來源說明)
+    yt-dlp 結束時會把 cookie jar 寫回 cookiefile，若 FB 回傳登出用的 Set-Cookie 就會把 c_user / xs 洗掉，
+    所以一律複製一份暫存檔給它用，原本的 fb_cookies.txt 永遠不會被改寫
+    1. 優先使用專案根目錄的 fb_cookies.txt（本地測試）
+    2. 沒有檔案時改用環境變數 FB_C_USER / FB_XS（或 c_user / xs），方便 Railway 部署
+    """
+    fd, temp_path = tempfile.mkstemp(prefix='fb_cookies_', suffix='.txt')
+    os.close(fd)
+
+    if os.path.exists(FB_COOKIE_PATH):
+        shutil.copyfile(FB_COOKIE_PATH, temp_path)
+        return temp_path, "fb_cookies.txt"
+
+    c_user = os.environ.get("FB_C_USER") or os.environ.get("c_user")
+    xs = os.environ.get("FB_XS") or os.environ.get("xs")
+    if c_user and xs:
+        expires = int(time.time()) + 365 * 24 * 3600
+        with open(temp_path, 'w', encoding='utf-8') as f:
+            f.write("# Netscape HTTP Cookie File\n")
+            for name, value in (("c_user", c_user.strip()), ("xs", xs.strip())):
+                f.write(f".facebook.com\tTRUE\t/\tTRUE\t{expires}\t{name}\t{value}\n")
+        return temp_path, "環境變數"
+
+    os.remove(temp_path)
+    return None, "無"
+
+
 def _download_fb_video_ytdlp(fb_url: str, max_filesize: int) -> dict | None:
     """yt-dlp 下載模組（含社團 permalink 自動探測）；有 fb_cookies.txt 時會帶入以下載需登入 / 成人限制影片"""
     temp_dir = tempfile.gettempdir()
@@ -498,31 +529,35 @@ def _download_fb_video_ytdlp(fb_url: str, max_filesize: int) -> dict | None:
         'http_headers': BROWSER_HEADERS,
     }
 
-    has_cookie = os.path.exists(FB_COOKIE_PATH)
-    if has_cookie:
-        ydl_opts['cookiefile'] = FB_COOKIE_PATH
-    print(f"[Rescue yt-dlp] 候選網址 {len(target_urls)} 個，使用 cookies: {has_cookie}")
+    cookie_path, cookie_source = _prepare_fb_cookie_file()
+    if cookie_path:
+        ydl_opts['cookiefile'] = cookie_path
+    print(f"[Rescue yt-dlp] 候選網址 {len(target_urls)} 個，cookies 來源: {cookie_source}")
 
-    for try_url in target_urls:
-        try:
-            with YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(try_url, download=True)
-                filename = ydl.prepare_filename(info)
-                if not os.path.exists(filename):
-                    base_name, _ = os.path.splitext(filename)
-                    if os.path.exists(f"{base_name}.mp4"):
-                        filename = f"{base_name}.mp4"
+    try:
+        for try_url in target_urls:
+            try:
+                with YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(try_url, download=True)
+                    filename = ydl.prepare_filename(info)
+                    if not os.path.exists(filename):
+                        base_name, _ = os.path.splitext(filename)
+                        if os.path.exists(f"{base_name}.mp4"):
+                            filename = f"{base_name}.mp4"
 
-                if os.path.exists(filename):
-                    return {
-                        'file_path': filename,
-                        'title': info.get('title') or "Facebook 影片"
-                    }
-                # yt-dlp 因 max_filesize 跳過下載時不會產生檔案
-                print(f"[Rescue yt-dlp] ⚠️ {try_url} 未產生檔案（可能超過 {max_filesize} bytes 上限）")
-        except Exception as e:
-            print(f"[Rescue yt-dlp] ❌ {try_url} 下載失敗: {str(e)[:200]}")
-            continue
+                    if os.path.exists(filename):
+                        return {
+                            'file_path': filename,
+                            'title': info.get('title') or "Facebook 影片"
+                        }
+                    # yt-dlp 因 max_filesize 跳過下載時不會產生檔案
+                    print(f"[Rescue yt-dlp] ⚠️ {try_url} 未產生檔案（可能超過 {max_filesize} bytes 上限）")
+            except Exception as e:
+                print(f"[Rescue yt-dlp] ❌ {try_url} 下載失敗: {str(e)[:200]}")
+                continue
+    finally:
+        if cookie_path and os.path.exists(cookie_path):
+            os.remove(cookie_path)
 
     return None
 
