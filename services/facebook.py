@@ -21,6 +21,12 @@ CRAWLER_HEADERS = {
     'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7'
 }
 
+# 一般瀏覽器標頭（yt-dlp 救援與社團影片 ID 探測使用）
+BROWSER_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7'
+}
+
 FB_COOKIE_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'fb_cookies.txt')
 
 
@@ -424,12 +430,8 @@ async def _watchdog_worker_embed(fix_msg: discord.Message, target_fb_url: str, r
             break
 
     if status != "ok":
-        print(f"[Watchdog] ⚠️ 初審未通過（等待 {waited:.0f} 秒，狀態: {status}），刪除代理訊息並輸出防呆卡片！")
-        try:
-            await fix_msg.delete()
-        except Exception:
-            pass
-        await _trigger_fallback_card(channel, target_fb_url)
+        print(f"[Watchdog] ⚠️ 初審未通過（等待 {waited:.0f} 秒，狀態: {status}），啟動 yt-dlp 救援！")
+        await _trigger_ytdlp_rescue(fix_msg, target_fb_url, raw_fb_url)
         return
 
     print(f"[Watchdog] 🔎 初審通過（等待 {waited:.0f} 秒），進入複審")
@@ -445,17 +447,165 @@ async def _watchdog_worker_embed(fix_msg: discord.Message, target_fb_url: str, r
             fb_cache[raw_fb_url] = {"type": "worker"}
             return
 
-        print("[Watchdog] ⚠️ 複審判定播放器破圖，輸出防呆卡片！")
-        try:
-            await fix_msg.delete()
-        except Exception:
-            pass
-        await _trigger_fallback_card(channel, target_fb_url)
+        print("[Watchdog] ⚠️ 複審判定播放器破圖，啟動 yt-dlp 救援！")
+        await _trigger_ytdlp_rescue(fix_msg, target_fb_url, raw_fb_url)
 
     except discord.NotFound:
         pass
     except Exception as e:
         print(f"[Watchdog] ❌ 階段二例外: {e}")
+
+
+def _download_fb_video_ytdlp(fb_url: str, max_filesize: int) -> dict | None:
+    """yt-dlp 下載模組（含社團 permalink 自動探測）；有 fb_cookies.txt 時會帶入以下載需登入 / 成人限制影片"""
+    temp_dir = tempfile.gettempdir()
+    out_template = os.path.join(temp_dir, 'fb_%(id)s.%(ext)s')
+
+    target_urls = []
+
+    id_match = re.search(r'/(?:reel|videos)/(\d+)', fb_url)
+    if id_match:
+        target_urls.append(f"https://www.facebook.com/watch/?v={id_match.group(1)}")
+        target_urls.append(f"https://www.facebook.com/reel/{id_match.group(1)}")
+
+    if "/groups/" in fb_url:
+        try:
+            m_url = re.sub(r'https?://(?:www\.)?facebook\.com', 'https://m.facebook.com', fb_url.split('?')[0])
+            res = requests.get(m_url, headers=BROWSER_HEADERS, impersonate="chrome120", timeout=8)
+            if res.status_code == 200:
+                unescaped = res.text.replace(r'\/', '/')
+                v_ids = re.findall(r'(?:video_id["\':=]|"video":\{"id":")(\d{12,18})', unescaped)
+                if not v_ids:
+                    v_ids = re.findall(r'"playable_url".*?"id":"(\d{12,18})"', unescaped)
+                for vid in v_ids:
+                    watch_candidate = f"https://www.facebook.com/watch/?v={vid}"
+                    if watch_candidate not in target_urls:
+                        target_urls.append(watch_candidate)
+        except Exception as e:
+            print(f"[Rescue yt-dlp] 探測社團影片 ID 失敗: {e}")
+
+    if fb_url not in target_urls:
+        target_urls.append(fb_url)
+
+    ydl_opts = {
+        'format': 'best[ext=mp4]/best',
+        'outtmpl': out_template,
+        'quiet': True,
+        'no_warnings': True,
+        'noplaylist': True,
+        'noprogress': True,
+        'max_filesize': max_filesize,
+        'http_headers': BROWSER_HEADERS,
+    }
+
+    has_cookie = os.path.exists(FB_COOKIE_PATH)
+    if has_cookie:
+        ydl_opts['cookiefile'] = FB_COOKIE_PATH
+    print(f"[Rescue yt-dlp] 候選網址 {len(target_urls)} 個，使用 cookies: {has_cookie}")
+
+    for try_url in target_urls:
+        try:
+            with YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(try_url, download=True)
+                filename = ydl.prepare_filename(info)
+                if not os.path.exists(filename):
+                    base_name, _ = os.path.splitext(filename)
+                    if os.path.exists(f"{base_name}.mp4"):
+                        filename = f"{base_name}.mp4"
+
+                if os.path.exists(filename):
+                    return {
+                        'file_path': filename,
+                        'title': info.get('title') or "Facebook 影片"
+                    }
+                # yt-dlp 因 max_filesize 跳過下載時不會產生檔案
+                print(f"[Rescue yt-dlp] ⚠️ {try_url} 未產生檔案（可能超過 {max_filesize} bytes 上限）")
+        except Exception as e:
+            print(f"[Rescue yt-dlp] ❌ {try_url} 下載失敗: {str(e)[:200]}")
+            continue
+
+    return None
+
+
+async def _trigger_ytdlp_rescue(fix_msg: discord.Message, target_fb_url: str, raw_fb_url: str):
+    """看門狗判定 Worker 播放器失效時：刪除代理訊息，改用 yt-dlp 下載影片並以 discord.File 上傳，失敗才輸出防呆卡片"""
+    print(f"\n[Rescue] 🚨 進入 yt-dlp 救援流程！目標: {target_fb_url}")
+    channel = fix_msg.channel
+    guild = fix_msg.guild
+
+    # 動態計算該伺服器的上傳上限（預留 512KB 安全緩衝，並保守限制在 24MB 內避免 413）
+    server_limit = getattr(guild, "filesize_limit", 10 * 1024 * 1024) if guild else 10 * 1024 * 1024
+    safe_upload_limit = min(server_limit - (512 * 1024), 24 * 1024 * 1024)
+
+    try:
+        await fix_msg.delete()
+    except Exception:
+        pass
+
+    try:
+        status_msg = await channel.send("⏳ **此影片無法直接預覽**，正在為您擷取原始檔案，請稍候...")
+    except Exception:
+        status_msg = None
+
+    async def _finish_with_embed(embed: discord.Embed):
+        if status_msg:
+            try:
+                await status_msg.edit(content=None, embed=embed)
+                return
+            except Exception:
+                pass
+        await channel.send(embed=embed)
+
+    ytdl_result = await asyncio.to_thread(_download_fb_video_ytdlp, target_fb_url, safe_upload_limit)
+
+    if ytdl_result and ytdl_result.get('file_path') and os.path.exists(ytdl_result['file_path']):
+        file_path = ytdl_result['file_path']
+        try:
+            file_size = os.path.getsize(file_path)
+            print(f"[Rescue] 下載完成，體積: {file_size} bytes (伺服器安全上限: {safe_upload_limit} bytes)")
+
+            # 關鍵防線：體積超出時直接攔截，絕不硬傳引發 413
+            if file_size > safe_upload_limit:
+                print("[Rescue] ⚠️ 檔案體積超出伺服器可上傳上限，轉為引導卡片")
+                await _finish_with_embed(discord.Embed(
+                    title="📦 影片檔案超出 Discord 上傳上限",
+                    description=f"此影片檔案大小為 **{round(file_size / (1024 * 1024), 2)} MB**，已超出此伺服器的檔案限制。\n請直接前往觀看：\n[點此開啟 Facebook 原片]({target_fb_url})",
+                    color=0x1877F2
+                ))
+                return
+
+            video_title = ytdl_result.get('title', 'Facebook 影片')
+            await channel.send(
+                content=f"**{video_title}**",
+                file=discord.File(file_path, filename="facebook_video.mp4")
+            )
+            print("[Rescue] ✅ 影片檔案上傳成功！")
+            if status_msg:
+                try:
+                    await status_msg.delete()
+                except Exception:
+                    pass
+            fb_cache[raw_fb_url] = {"type": "downloaded"}
+            return
+        except discord.HTTPException as http_err:
+            print(f"[Rescue] ❌ 上傳檔案遇到 HTTP 例外 (包含 413): {http_err}")
+            await _finish_with_embed(discord.Embed(
+                title="📦 影片超出伺服器負載上限",
+                description=f"Discord 拒絕接收此檔案，請直接至原網址觀看：\n[點此開啟 Facebook 原片]({target_fb_url})",
+                color=0x1877F2
+            ))
+            return
+        finally:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+
+    # 下載失敗時的保底卡片
+    print("[Rescue] ❌ yt-dlp 救援失敗，輸出防呆卡片")
+    await _finish_with_embed(discord.Embed(
+        title="🔒 此 Facebook 內容受限或無法取得公開媒體",
+        description=f"請直接點擊原連結前往觀看：\n[前往 Facebook 觀看]({target_fb_url})",
+        color=0x1877F2
+    ))
 
 
 async def process_facebook_embed(raw_fb_url: str, message: discord.Message, pending_suppress_ids: set):
