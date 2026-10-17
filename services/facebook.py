@@ -392,10 +392,14 @@ async def _trigger_fallback_card(channel: discord.abc.Messageable, original_url:
 WATCHDOG_POLL_INTERVAL = 2.0   # 每隔幾秒檢查一次
 WATCHDOG_FIRST_WAIT = 20.0     # 初審最多等幾秒
 WATCHDOG_SECOND_WAIT = 8.0     # 初審通過後再等幾秒做複審
+WATCHDOG_NO_VIDEO_GRACE = 6.0  # 預覽卡片已出現但沒有影片（例如 FB 登入卡片）時，再觀察幾秒就提早救援
 
 
 def _find_valid_video(msg: discord.Message | None, require_proxy: bool = False) -> str:
-    """檢查訊息的 Embed 影片狀態：回傳 "ok"、"fake"（假影片）或 "none"（還沒有影片）"""
+    """
+    檢查訊息的 Embed 影片狀態：
+    "ok"（有影片）、"fake"（假影片）、"novideo"（卡片已出現但沒有影片）或 "none"（卡片還沒出現）
+    """
     if not msg or not msg.embeds:
         return "none"
     for emb in msg.embeds:
@@ -406,7 +410,7 @@ def _find_valid_video(msg: discord.Message | None, require_proxy: bool = False) 
             if require_proxy and not emb.video.proxy_url:
                 continue
             return "ok"
-    return "none"
+    return "novideo"
 
 
 async def _watchdog_worker_embed(fix_msg: discord.Message, target_fb_url: str, raw_fb_url: str, fix_fb_url: str):
@@ -415,8 +419,10 @@ async def _watchdog_worker_embed(fix_msg: discord.Message, target_fb_url: str, r
     channel = fix_msg.channel
 
     # 階段一：每 2 秒檢查一次，最多等 20 秒，影片一出現就提早通過
+    # 卡片已出現卻沒有影片（例如 "Log in or sign up to view"）且持續 6 秒，判定失敗提早救援
     status = "none"
     waited = 0.0
+    no_video_for = 0.0
     while waited < WATCHDOG_FIRST_WAIT:
         await asyncio.sleep(WATCHDOG_POLL_INTERVAL)
         waited += WATCHDOG_POLL_INTERVAL
@@ -428,6 +434,12 @@ async def _watchdog_worker_embed(fix_msg: discord.Message, target_fb_url: str, r
             refreshed_msg = None
 
         status = _find_valid_video(refreshed_msg)
+        if status == "novideo":
+            no_video_for += WATCHDOG_POLL_INTERVAL
+            if no_video_for >= WATCHDOG_NO_VIDEO_GRACE:
+                break
+            continue
+        no_video_for = 0.0
         if status != "none":
             break
 
